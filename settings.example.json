@@ -1,0 +1,10 @@
+{
+  "api_key": "",
+  "model": "claude-sonnet-5",
+  "use_local_cache": true,
+  "use_prompt_cache": true,
+  "early_stop_caratula": true,
+  "max_pages_per_doc": 3,
+  "image_max_dim": 1400,
+  "jpeg_quality": 82
+}

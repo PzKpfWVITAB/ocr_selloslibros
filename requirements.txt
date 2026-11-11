@@ -1,0 +1,7 @@
+rapidocr-onnxruntime>=1.4.0
+winocr>=0.0.15
+pymupdf>=1.24.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+pyinstaller>=6.0.0
+

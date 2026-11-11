@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+_preserved_portable_state/
+
+# Caches locales y archivos temporales de ejecución
+cache/
+*.log
+
+# Base de datos SQLite local y respaldos de rollback
+auditoria_libros.db
+auditoria_libros.db-journal
+rollback_backups/
+backups_rollback/
+
+# Configuración local con claves privadas de API y variables de entorno
+settings.json
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Editores e IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Archivos del sistema operativo (Windows / Mac)
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
