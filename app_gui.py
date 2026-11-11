@@ -22,6 +22,9 @@ from src.core.settings_manager import SettingsManager, AVAILABLE_MODELS
 from src.core.claude_engine import ClaudeVisionEngine
 from src.parsers.folder_parser import FolderParser
 from src.core.file_operations import FileOperations
+from src.database.mysql_manager import MySQLManager
+from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
+from src.core.folder_file_separator import FolderFileSeparator
 
 
 class SettingsDialog(tk.Toplevel):
@@ -680,6 +683,675 @@ class ManualEditDialog(tk.Toplevel):
         self.parent_app.rename_selected_folder()
 
 
+
+class MySQLSettingsDialog(tk.Toplevel):
+    """Ventana de configuración, prueba de conexión y creación de base de datos y tablas MySQL."""
+
+    def __init__(self, parent: "OCRLibrosApp"):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("🗄 Conexión MySQL & Trazabilidad Total")
+        self.geometry("640x530")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self.current_settings = SettingsManager.load()
+        self._build_ui()
+
+    def _build_ui(self):
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        header_lbl = ttk.Label(
+            container,
+            text="Control y Conexión a Base de Datos MySQL para Trazabilidad Total",
+            font=("Segoe UI", 11, "bold")
+        )
+        header_lbl.pack(anchor=tk.W, pady=(0, 4))
+
+        desc_lbl = ttk.Label(
+            container,
+            text="Permite probar la conexión y crear automáticamente la base de datos y las tablas de trazabilidad.",
+            font=("Segoe UI", 9),
+            foreground="#475569"
+        )
+        desc_lbl.pack(anchor=tk.W, pady=(0, 12))
+
+        form_frame = ttk.LabelFrame(container, text=" Parámetros del Servidor MySQL ", padding=12)
+        form_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Host y Puerto
+        ttk.Label(form_frame, text="Servidor / Host:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        self.host_var = tk.StringVar(value=str(self.current_settings.get("mysql_host", "127.0.0.1")))
+        ttk.Entry(form_frame, textvariable=self.host_var, width=28).grid(row=0, column=1, sticky=tk.W, padx=6, pady=4)
+
+        ttk.Label(form_frame, text="Puerto:").grid(row=0, column=2, sticky=tk.W, padx=(12, 0), pady=4)
+        self.port_var = tk.StringVar(value=str(self.current_settings.get("mysql_port", 3306)))
+        ttk.Entry(form_frame, textvariable=self.port_var, width=10).grid(row=0, column=3, sticky=tk.W, padx=6, pady=4)
+
+        # Usuario y Contraseña
+        ttk.Label(form_frame, text="Usuario:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        self.user_var = tk.StringVar(value=str(self.current_settings.get("mysql_user", "root")))
+        ttk.Entry(form_frame, textvariable=self.user_var, width=28).grid(row=1, column=1, sticky=tk.W, padx=6, pady=4)
+
+        ttk.Label(form_frame, text="Contraseña:").grid(row=1, column=2, sticky=tk.W, padx=(12, 0), pady=4)
+        self.pass_var = tk.StringVar(value=str(self.current_settings.get("mysql_password", "")))
+        self.entry_pass = ttk.Entry(form_frame, textvariable=self.pass_var, width=18, show="•")
+        self.entry_pass.grid(row=1, column=3, sticky=tk.W, padx=6, pady=4)
+
+        # Base de Datos
+        ttk.Label(form_frame, text="Base de Datos:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        self.db_var = tk.StringVar(value=str(self.current_settings.get("mysql_database", "trazabilidad_selloslibros")))
+        ttk.Entry(form_frame, textvariable=self.db_var, width=28).grid(row=2, column=1, sticky=tk.W, padx=6, pady=4)
+
+        self.show_pass_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            form_frame,
+            text="Ver clave",
+            variable=self.show_pass_var,
+            command=self._toggle_pass
+        ).grid(row=2, column=3, sticky=tk.W, padx=6, pady=4)
+
+        # Checkbox activar MySQL
+        self.enabled_var = tk.BooleanVar(value=bool(self.current_settings.get("mysql_enabled", False)))
+        chk_act = ttk.Checkbutton(
+            container,
+            text="Activar registro activo de trazabilidad en MySQL (movimientos físicos, hashes y separaciones)",
+            variable=self.enabled_var
+        )
+        chk_act.pack(anchor=tk.W, pady=(0, 10))
+
+        # Botones de Acción: Probar Conexión y Crear Tablas
+        btn_box = ttk.Frame(container)
+        btn_box.pack(fill=tk.X, pady=(0, 10))
+
+        self.btn_test = ttk.Button(
+            btn_box,
+            text="🔌 Probar Conexión",
+            command=self._test_connection
+        )
+        self.btn_test.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_init = ttk.Button(
+            btn_box,
+            text="🏗 Crear Base de Datos y Tablas",
+            style="Primary.TButton",
+            command=self._init_database
+        )
+        self.btn_init.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Estado / Mensajes de diagnóstico
+        self.lbl_status = tk.Label(
+            container,
+            text="",
+            font=("Segoe UI", 9, "bold"),
+            bg="#f8fafc",
+            fg="#334155",
+            relief=tk.GROOVE,
+            bd=1,
+            padx=10,
+            pady=8,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=580
+        )
+        self.lbl_status.pack(fill=tk.X, pady=(0, 14))
+
+        # Botones inferiores (Guardar / Cerrar)
+        bot_bar = ttk.Frame(container)
+        bot_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        ttk.Button(bot_bar, text="💾 Guardar Configuración", style="Primary.TButton", command=self._save_settings).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(bot_bar, text="Cerrar", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _toggle_pass(self):
+        self.entry_pass.config(show="" if self.show_pass_var.get() else "•")
+
+    def _test_connection(self):
+        h = self.host_var.get().strip()
+        p = self.port_var.get().strip()
+        u = self.user_var.get().strip()
+        pwd = self.pass_var.get()
+
+        try:
+            port_int = int(p)
+        except ValueError:
+            self.lbl_status.config(text="✖ Error: El puerto debe ser un número entero (ej. 3306).", fg="#dc2626")
+            return
+
+        self.lbl_status.config(text="⏳ Conectando al servidor MySQL...", fg="#0284c7")
+        self.update_idletasks()
+
+        ok, msg = MySQLManager.test_connection_params(h, port_int, u, pwd)
+        if ok:
+            self.lbl_status.config(text=f"✔ {msg}", fg="#16a34a")
+        else:
+            self.lbl_status.config(text=f"✖ {msg}", fg="#dc2626")
+
+    def _init_database(self):
+        h = self.host_var.get().strip()
+        p = self.port_var.get().strip()
+        u = self.user_var.get().strip()
+        pwd = self.pass_var.get()
+        db = self.db_var.get().strip()
+
+        try:
+            port_int = int(p)
+        except ValueError:
+            self.lbl_status.config(text="✖ Error: El puerto debe ser numérico.", fg="#dc2626")
+            return
+
+        if not db:
+            self.lbl_status.config(text="✖ Error: Especifica un nombre para la base de datos.", fg="#dc2626")
+            return
+
+        self.lbl_status.config(text="⏳ Creando base de datos y tablas de trazabilidad...", fg="#0284c7")
+        self.update_idletasks()
+
+        mgr = MySQLManager({
+            "mysql_host": h,
+            "mysql_port": port_int,
+            "mysql_user": u,
+            "mysql_password": pwd,
+            "mysql_database": db,
+            "mysql_enabled": True
+        })
+        ok, msg = mgr.init_database_and_tables()
+
+        if ok:
+            self.lbl_status.config(
+                text=f"✔ {msg}\nTablas activas: 'movimientos_carpetas', 'trazabilidad_archivos', 'separaciones_carpetas', 'auditoria_diagnosticos'.",
+                fg="#16a34a"
+            )
+            self.enabled_var.set(True)
+            messagebox.showinfo("MySQL Inicializado", f"{msg}\n\nLas tablas de trazabilidad total están listas.")
+        else:
+            self.lbl_status.config(text=f"✖ {msg}", fg="#dc2626")
+            messagebox.showerror("Error al crear tablas", msg)
+
+    def _save_settings(self):
+        try:
+            p_int = int(self.port_var.get().strip())
+        except ValueError:
+            p_int = 3306
+
+        self.current_settings["mysql_host"] = self.host_var.get().strip()
+        self.current_settings["mysql_port"] = p_int
+        self.current_settings["mysql_user"] = self.user_var.get().strip()
+        self.current_settings["mysql_password"] = self.pass_var.get()
+        self.current_settings["mysql_database"] = self.db_var.get().strip()
+        self.current_settings["mysql_enabled"] = self.enabled_var.get()
+
+        SettingsManager.save(self.current_settings)
+        self.parent_app.mysql_manager.update_config(
+            host=self.current_settings["mysql_host"],
+            port=p_int,
+            user=self.current_settings["mysql_user"],
+            password=self.current_settings["mysql_password"],
+            database=self.current_settings["mysql_database"],
+            enabled=self.current_settings["mysql_enabled"]
+        )
+        self.parent_app._refresh_header_badge()
+        messagebox.showinfo("Configuración Guardada", "Parámetros de MySQL guardados exitosamente.")
+        self.destroy()
+
+
+class FolderRenamerDialog(tk.Toplevel):
+    """Ventana para renombrar carpetas según el primer PDF hasta el año (regla 0000 y colisión _2)."""
+
+    def __init__(self, parent: "OCRLibrosApp", initial_path: str = ""):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("📁 Renombrar Carpetas por Primer PDF (con Regla 0000 y Colisiones _2)")
+        self.geometry("1060x650")
+        self.minsize(880, 500)
+        self.transient(parent)
+        self.grab_set()
+
+        self.renamer = FolderRenamerByFirstPdf(self.parent_app.mysql_manager)
+        self.preview_data: List[Dict[str, Any]] = []
+        self._build_ui(initial_path)
+
+    def _build_ui(self, initial_path: str):
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        top_frame = ttk.LabelFrame(container, text=" Carpeta Contenedora de Libros ", padding=8)
+        top_frame.pack(fill=tk.X, pady=(0, 8))
+
+        row1 = ttk.Frame(top_frame)
+        row1.pack(fill=tk.X)
+
+        self.path_var = tk.StringVar(value=initial_path or self.parent_app.path_var.get())
+        ttk.Label(row1, text="Ruta:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row1, textvariable=self.path_var, font=("Consolas", 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(row1, text="Examinar...", command=self._browse_dir).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row1, text="🔍 Escanear / Vista Previa", style="Primary.TButton", command=self._scan_preview).pack(side=tk.LEFT)
+
+        # Resumen / Progreso
+        summary_frame = ttk.Frame(container)
+        summary_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.lbl_summary = ttk.Label(summary_frame, text="Haz clic en '🔍 Escanear / Vista Previa' para analizar las carpetas.", font=("Segoe UI", 9, "bold"))
+        self.lbl_summary.pack(side=tk.LEFT)
+
+        self.mysql_active_var = tk.BooleanVar(value=self.parent_app.mysql_manager.enabled)
+        chk_my = ttk.Checkbutton(summary_frame, text="Registrar movimientos en MySQL", variable=self.mysql_active_var)
+        chk_my.pack(side=tk.RIGHT)
+
+        # Tabla de Vista Previa
+        tree_frame = ttk.Frame(container)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        cols = ("num", "orig_name", "first_pdf", "sugg_name", "col", "status", "detail")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended")
+        self.tree.heading("num", text="#")
+        self.tree.heading("orig_name", text="Carpeta Original")
+        self.tree.heading("first_pdf", text="Primer Archivo PDF")
+        self.tree.heading("sugg_name", text="Nombre Sugerido (hasta Año)")
+        self.tree.heading("col", text="Colisión")
+        self.tree.heading("status", text="Estado")
+        self.tree.heading("detail", text="Detalle / Regla Aplicada")
+
+        self.tree.column("num", width=40, anchor=tk.CENTER, stretch=False)
+        self.tree.column("orig_name", width=220, anchor=tk.W)
+        self.tree.column("first_pdf", width=250, anchor=tk.W)
+        self.tree.column("sugg_name", width=220, anchor=tk.W)
+        self.tree.column("col", width=65, anchor=tk.CENTER, stretch=False)
+        self.tree.column("status", width=120, anchor=tk.CENTER)
+        self.tree.column("detail", width=200, anchor=tk.W)
+
+        self.tree.tag_configure("needs_rename", background="#fffbeb", foreground="#b45309")
+        self.tree.tag_configure("match", background="#f0fdf4", foreground="#15803d")
+        self.tree.tag_configure("applied", background="#ecfdf5", foreground="#047857")
+        self.tree.tag_configure("error", background="#fef2f2", foreground="#b91c1c")
+
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Botones inferiores
+        bot_bar = ttk.Frame(container)
+        bot_bar.pack(fill=tk.X)
+
+        self.btn_apply = ttk.Button(
+            bot_bar,
+            text="▶ Ejecutar Renombrado Físico",
+            style="Primary.TButton",
+            command=self._apply_renames,
+            state=tk.DISABLED
+        )
+        self.btn_apply.pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(bot_bar, text="Cerrar", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _browse_dir(self):
+        sel = filedialog.askdirectory(title="Seleccionar Carpeta Contenedora", initialdir=self.path_var.get())
+        if sel:
+            self.path_var.set(sel)
+            self._scan_preview()
+
+    def _scan_preview(self):
+        root_path = Path(self.path_var.get().strip())
+        if not root_path.is_dir():
+            messagebox.showerror("Error", "La ruta especificada no existe o no es un directorio.")
+            return
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.preview_data.clear()
+
+        subfolders = sorted([f for f in root_path.iterdir() if f.is_dir()])
+        total_sub = len(subfolders)
+        to_rename_cnt = 0
+        already_ok_cnt = 0
+
+        for idx, f_path in enumerate(subfolders, start=1):
+            prev = self.renamer.preview_folder_rename(f_path)
+            self.preview_data.append(prev)
+
+            col_str = f"_{prev.get('collision_index')}" if prev.get("collision_index", 0) > 0 else "-"
+            st = prev.get("status", "")
+            if prev.get("needs_rename"):
+                tag = "needs_rename"
+                to_rename_cnt += 1
+                status_txt = "✏ Requiere Renombre"
+            elif st == "YA_TIENE_NOMBRE_CORRECTO":
+                tag = "match"
+                already_ok_cnt += 1
+                status_txt = "✔ Ya Coincide"
+            else:
+                tag = "error"
+                status_txt = f"✖ {st}"
+
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=f"ren_{idx}",
+                values=(
+                    idx,
+                    prev.get("original_name", ""),
+                    prev.get("first_pdf", "-"),
+                    prev.get("suggested_name", "-"),
+                    col_str,
+                    status_txt,
+                    prev.get("detail", prev.get("message", ""))
+                ),
+                tags=(tag,)
+            )
+
+        self.lbl_summary.config(
+            text=f"Total: {total_sub} carpetas analizadas  |  {to_rename_cnt} por renombrar  |  {already_ok_cnt} ya correctas"
+        )
+        self.btn_apply.config(state=tk.NORMAL if to_rename_cnt > 0 else tk.DISABLED)
+
+    def _apply_renames(self):
+        items_to_rename = [item for item in self.preview_data if item.get("needs_rename")]
+        if not items_to_rename:
+            messagebox.showinfo("Información", "No hay carpetas pendientes de renombrar.")
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Renombrado Físico",
+            f"¿Deseas aplicar el renombrado físico a las {len(items_to_rename)} carpetas?\n\n"
+            f"• Se tomará el nombre del 1er PDF hasta el año.\n"
+            f"• Si el PDF tiene año '0000', se conservará el año de la carpeta original.\n"
+            f"• Las colisiones se resolverán con _2 solo en la carpeta.\n"
+            f"• MySQL activo: {'Sí' if self.mysql_active_var.get() else 'No'}"
+        ):
+            return
+
+        renamed_count = 0
+        error_count = 0
+
+        # Activar/desactivar MySQL temporalmente según el checkbox
+        prev_enabled = self.parent_app.mysql_manager.enabled
+        self.parent_app.mysql_manager.enabled = self.mysql_active_var.get()
+
+        try:
+            for idx, item in enumerate(self.preview_data, start=1):
+                if not item.get("needs_rename"):
+                    continue
+                orig_folder = Path(item["folder_path"])
+                res = self.renamer.execute_folder_rename(orig_folder)
+                iid = f"ren_{idx}"
+                if res.get("applied"):
+                    renamed_count += 1
+                    self.tree.item(
+                        iid,
+                        values=(
+                            idx,
+                            item.get("original_name"),
+                            item.get("first_pdf"),
+                            res.get("suggested_name"),
+                            f"_{res.get('collision_index')}" if res.get("collision_index", 0) > 0 else "-",
+                            "✔ Renombrada",
+                            res.get("message", "OK")
+                        ),
+                        tags=("applied",)
+                    )
+                else:
+                    error_count += 1
+                    self.tree.item(
+                        iid,
+                        values=(
+                            idx,
+                            item.get("original_name"),
+                            item.get("first_pdf"),
+                            item.get("suggested_name"),
+                            "-",
+                            "✖ Error",
+                            res.get("message", "Fallo")
+                        ),
+                        tags=("error",)
+                    )
+        finally:
+            self.parent_app.mysql_manager.enabled = prev_enabled
+
+        self.btn_apply.config(state=tk.DISABLED)
+        messagebox.showinfo(
+            "Renombrado Completado",
+            f"Proceso finalizado:\n\n✔ Carpetas renombradas exitosamente: {renamed_count}\n✖ Errores: {error_count}"
+        )
+        self.parent_app.reload_root_preview()
+
+
+class FolderSeparatorDialog(tk.Toplevel):
+    """Ventana para detectar y separar archivos mezclados pertenecientes a libros/secciones distintos."""
+
+    def __init__(self, parent: "OCRLibrosApp", initial_path: str = ""):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("🔀 Separar Archivos Mezclados (Libros y Secciones Distintos)")
+        self.geometry("1100x670")
+        self.minsize(920, 520)
+        self.transient(parent)
+        self.grab_set()
+
+        self.separator = FolderFileSeparator(self.parent_app.mysql_manager)
+        self.inspected_folders: List[Dict[str, Any]] = []
+        self._build_ui(initial_path)
+
+    def _build_ui(self, initial_path: str):
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        top_frame = ttk.LabelFrame(container, text=" Carpeta Raíz con Libros Registrales ", padding=8)
+        top_frame.pack(fill=tk.X, pady=(0, 8))
+
+        row1 = ttk.Frame(top_frame)
+        row1.pack(fill=tk.X)
+
+        self.path_var = tk.StringVar(value=initial_path or self.parent_app.path_var.get())
+        ttk.Label(row1, text="Ruta:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row1, textvariable=self.path_var, font=("Consolas", 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(row1, text="Examinar...", command=self._browse_dir).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row1, text="🔍 Detectar Carpetas Mezcladas", style="Primary.TButton", command=self._scan_mixed).pack(side=tk.LEFT)
+
+        summary_frame = ttk.Frame(container)
+        summary_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.lbl_summary = ttk.Label(summary_frame, text="Haz clic en '🔍 Detectar Carpetas Mezcladas' para escanear.", font=("Segoe UI", 9, "bold"))
+        self.lbl_summary.pack(side=tk.LEFT)
+
+        self.mysql_active_var = tk.BooleanVar(value=self.parent_app.mysql_manager.enabled)
+        chk_my = ttk.Checkbutton(summary_frame, text="Registrar movimientos y hashes en MySQL", variable=self.mysql_active_var)
+        chk_my.pack(side=tk.RIGHT)
+
+        paned = ttk.PanedWindow(container, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        # Tabla superior: Lista de Carpetas
+        top_pane = ttk.Frame(paned)
+        paned.add(top_pane, weight=2)
+
+        cols = ("num", "folder", "total_pdfs", "groups_count", "primary", "status")
+        self.tree_folders = ttk.Treeview(top_pane, columns=cols, show="headings", selectmode="browse")
+        self.tree_folders.heading("num", text="#")
+        self.tree_folders.heading("folder", text="Carpeta")
+        self.tree_folders.heading("total_pdfs", text="Total PDFs")
+        self.tree_folders.heading("groups_count", text="Grupos Únicos")
+        self.tree_folders.heading("primary", text="Grupo Primario (Permanece)")
+        self.tree_folders.heading("status", text="Diagnóstico")
+
+        self.tree_folders.column("num", width=40, anchor=tk.CENTER, stretch=False)
+        self.tree_folders.column("folder", width=280, anchor=tk.W)
+        self.tree_folders.column("total_pdfs", width=80, anchor=tk.CENTER, stretch=False)
+        self.tree_folders.column("groups_count", width=95, anchor=tk.CENTER, stretch=False)
+        self.tree_folders.column("primary", width=250, anchor=tk.W)
+        self.tree_folders.column("status", width=140, anchor=tk.CENTER)
+
+        self.tree_folders.tag_configure("mixed", background="#fff1f2", foreground="#be123c")
+        self.tree_folders.tag_configure("clean", background="#f0fdf4", foreground="#15803d")
+        self.tree_folders.tag_configure("done", background="#ecfdf5", foreground="#047857")
+
+        scroll1 = ttk.Scrollbar(top_pane, orient=tk.VERTICAL, command=self.tree_folders.yview)
+        self.tree_folders.configure(yscrollcommand=scroll1.set)
+        self.tree_folders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll1.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree_folders.bind("<<TreeviewSelect>>", self._on_folder_selected)
+
+        # Panel inferior: Detalle de grupos y archivos a separar
+        bot_pane = ttk.LabelFrame(paned, text=" Detalle de Grupos de Archivos y Acciones de Separación ", padding=6)
+        paned.add(bot_pane, weight=2)
+
+        self.txt_detail = tk.Text(bot_pane, font=("Consolas", 9), wrap=tk.WORD, height=8)
+        scroll2 = ttk.Scrollbar(bot_pane, orient=tk.VERTICAL, command=self.txt_detail.yview)
+        self.txt_detail.configure(yscrollcommand=scroll2.set)
+        self.txt_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll2.pack(side=tk.RIGHT, fill=tk.Y)
+
+        bot_bar = ttk.Frame(container)
+        bot_bar.pack(fill=tk.X)
+
+        self.btn_apply = ttk.Button(
+            bot_bar,
+            text="▶ Aplicar Separación Física en Nuevas Carpetas",
+            style="Primary.TButton",
+            command=self._apply_splits,
+            state=tk.DISABLED
+        )
+        self.btn_apply.pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(bot_bar, text="Cerrar", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _browse_dir(self):
+        sel = filedialog.askdirectory(title="Seleccionar Carpeta", initialdir=self.path_var.get())
+        if sel:
+            self.path_var.set(sel)
+            self._scan_mixed()
+
+    def _scan_mixed(self):
+        root_path = Path(self.path_var.get().strip())
+        if not root_path.is_dir():
+            messagebox.showerror("Error", "La ruta especificada no existe o no es un directorio.")
+            return
+
+        for item in self.tree_folders.get_children():
+            self.tree_folders.delete(item)
+        self.inspected_folders.clear()
+        self.txt_detail.delete("1.0", tk.END)
+
+        subfolders = sorted([f for f in root_path.iterdir() if f.is_dir()])
+        mixed_count = 0
+
+        for idx, f_path in enumerate(subfolders, start=1):
+            insp = self.separator.preview_folder_split(f_path)
+            self.inspected_folders.append(insp)
+
+            is_m = insp.get("is_mixed", False)
+            if is_m:
+                mixed_count += 1
+                tag = "mixed"
+                st = f"⚠ MEZCLADA ({insp.get('total_groups')} libros)"
+            else:
+                tag = "clean"
+                st = "✔ Homogénea (1 solo libro)"
+
+            self.tree_folders.insert(
+                "",
+                tk.END,
+                iid=f"sep_{idx}",
+                values=(
+                    idx,
+                    insp.get("folder_name"),
+                    insp.get("total_pdfs"),
+                    insp.get("total_groups"),
+                    insp.get("primary_group", "-"),
+                    st
+                ),
+                tags=(tag,)
+            )
+
+        self.lbl_summary.config(
+            text=f"Total: {len(subfolders)} carpetas  |  {mixed_count} contienen libros/secciones mezclados"
+        )
+        self.btn_apply.config(state=tk.NORMAL if mixed_count > 0 else tk.DISABLED)
+
+    def _on_folder_selected(self, event=None):
+        sel = self.tree_folders.selection()
+        if not sel:
+            return
+        idx = int(sel[0].replace("sep_", "")) - 1
+        if 0 <= idx < len(self.inspected_folders):
+            insp = self.inspected_folders[idx]
+            self.txt_detail.delete("1.0", tk.END)
+            self.txt_detail.insert(tk.END, f"CARPETA: {insp.get('folder_path')}\n")
+            self.txt_detail.insert(tk.END, f"TOTAL ARCHIVOS PDF: {insp.get('total_pdfs')}  |  GRUPOS IDENTIFICADOS: {insp.get('total_groups')}\n")
+            self.txt_detail.insert(tk.END, f"GRUPO PRIMARIO (PERMANECE EN ESTA CARPETA): {insp.get('primary_group')}\n\n")
+
+            if insp.get("is_mixed"):
+                self.txt_detail.insert(tk.END, "=== ACCIONES DE SEPARACIÓN (CREAR CARPETAS Y MOVER ARCHIVOS) ===\n")
+                for act in insp.get("split_actions", []):
+                    self.txt_detail.insert(tk.END, f"\n📁 CREAR CARPETA: {act['target_folder_name']}\n")
+                    self.txt_detail.insert(tk.END, f"   Clave de Libro: {act['group_key']}\n")
+                    self.txt_detail.insert(tk.END, f"   Archivos a Mover ({act['files_count']}):\n")
+                    for fn in act["files"]:
+                        self.txt_detail.insert(tk.END, f"     • {fn}\n")
+            else:
+                self.txt_detail.insert(tk.END, "Todos los archivos de esta carpeta pertenecen al mismo Libro y Sección.\n")
+
+    def _apply_splits(self):
+        mixed_items = [item for item in self.inspected_folders if item.get("is_mixed")]
+        if not mixed_items:
+            messagebox.showinfo("Información", "No hay carpetas mezcladas pendientes de separar.")
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Separación Física",
+            f"¿Deseas aplicar la separación física en las {len(mixed_items)} carpetas mezcladas?\n\n"
+            f"• Se crearán carpetas individuales para cada Libro / Sección diferente.\n"
+            f"• Se mantendrán juntos los registros y sus carátulas asociadas.\n"
+            f"• Se calculará el hash SHA-256 de cada PDF movido.\n"
+            f"• MySQL activo: {'Sí' if self.mysql_active_var.get() else 'No'}"
+        ):
+            return
+
+        separated_folders_count = 0
+        total_files_moved = 0
+
+        prev_enabled = self.parent_app.mysql_manager.enabled
+        self.parent_app.mysql_manager.enabled = self.mysql_active_var.get()
+
+        try:
+            for idx, item in enumerate(self.inspected_folders, start=1):
+                if not item.get("is_mixed"):
+                    continue
+                f_path = Path(item["folder_path"])
+                res = self.separator.execute_folder_split(f_path)
+                iid = f"sep_{idx}"
+                if res.get("applied"):
+                    separated_folders_count += 1
+                    acts = res.get("executed_actions", [])
+                    files_cnt = sum(a.get("files_moved_count", 0) for a in acts)
+                    total_files_moved += files_cnt
+                    self.tree_folders.item(
+                        iid,
+                        values=(
+                            idx,
+                            item.get("folder_name"),
+                            item.get("total_pdfs"),
+                            item.get("total_groups"),
+                            item.get("primary_group"),
+                            f"✔ SEPARADA ({files_cnt} movidos)"
+                        ),
+                        tags=("done",)
+                    )
+        finally:
+            self.parent_app.mysql_manager.enabled = prev_enabled
+
+        self.btn_apply.config(state=tk.DISABLED)
+        messagebox.showinfo(
+            "Separación Completada",
+            f"Proceso finalizado exitosamente:\n\n"
+            f"✔ Carpetas procesadas: {separated_folders_count}\n"
+            f"✔ Archivos PDF clasificados y movidos: {total_files_moved}\n"
+            f"✔ Todos los movimientos registrados con trazabilidad total."
+        )
+        self.parent_app.reload_root_preview()
+
+
 class OCRLibrosApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -695,6 +1367,7 @@ class OCRLibrosApp(tk.Tk):
 
         self._configure_styles()
         self.service = FolderOCRService()
+        self.mysql_manager = MySQLManager(self.service.settings)
         self.is_processing = False
         self.stop_requested = False
 
@@ -721,6 +1394,14 @@ class OCRLibrosApp(tk.Tk):
 
     def _create_menu(self):
         menubar = tk.Menu(self)
+
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="📁 Renombrar Carpetas por Primer PDF (con regla 0000)...", command=self.open_folder_renamer_dialog)
+        tools_menu.add_command(label="🔀 Separar Archivos Mezclados en Carpetas Nuevas...", command=self.open_folder_separator_dialog)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🗄 Conexión MySQL & Crear Tablas de Trazabilidad...", command=self.open_mysql_dialog)
+        menubar.add_cascade(label="🛠 Trazabilidad Física y MySQL", menu=tools_menu)
+
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(label="⚙ Configurar API Key y Caché...", command=self.open_settings_dialog)
         config_menu.add_command(
@@ -764,6 +1445,13 @@ class OCRLibrosApp(tk.Tk):
 
         self.lbl_api_badge = ttk.Label(right_header, text="", font=("Consolas", 9), foreground="#0369a1")
         self.lbl_api_badge.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            right_header,
+            text="🗄 Conexión MySQL",
+            style="Action.TButton",
+            command=self.open_mysql_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Button(
             right_header,
@@ -979,6 +1667,36 @@ class OCRLibrosApp(tk.Tk):
             command=self.batch_move_all_validados
         ).pack(side=tk.LEFT)
 
+        row_act3 = ttk.Frame(action_frame)
+        row_act3.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Label(
+            row_act3,
+            text="Herramientas Físicas y Trazabilidad:",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#0369a1"
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            row_act3,
+            text="📁 Renombrar Carpetas por 1er PDF (hasta Año + Regla 0000)",
+            style="Primary.TButton",
+            command=self.open_folder_renamer_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act3,
+            text="🔀 Separar Archivos Mezclados (Libros/Secciones Distintos)",
+            style="Action.TButton",
+            command=self.open_folder_separator_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act3,
+            text="🗄 Conexión MySQL & Trazabilidad",
+            command=self.open_mysql_dialog
+        ).pack(side=tk.LEFT)
+
         # 5. Panel Dividido (Pestañas en Tiempo Real + Detalle)
         paned = ttk.PanedWindow(main_frame, orient=tk.VERTICAL)
         paned.pack(fill=tk.BOTH, expand=True)
@@ -1114,6 +1832,15 @@ class OCRLibrosApp(tk.Tk):
     def open_settings_dialog(self):
         SettingsDialog(self)
 
+    def open_mysql_dialog(self):
+        MySQLSettingsDialog(self)
+
+    def open_folder_renamer_dialog(self):
+        FolderRenamerDialog(self, initial_path=self.path_var.get())
+
+    def open_folder_separator_dialog(self):
+        FolderSeparatorDialog(self, initial_path=self.path_var.get())
+
     def open_rollback_dialog(self):
         RollbackAndDatabaseDialog(self)
 
@@ -1136,8 +1863,9 @@ class OCRLibrosApp(tk.Tk):
         model = cfg.get("model", "claude-sonnet-5")
         stats = self.service.cache.get_summary()
         rb_count = len(self.service.db.get_rollback_candidates())
+        my_status = "🐬 MySQL: Activo" if (hasattr(self, "mysql_manager") and self.mysql_manager.enabled) else "MySQL: Off"
         self.lbl_api_badge.config(
-            text=f"Modelo: {model} | Key: {masked} | Caché: {stats['cached_documents_on_disk']} | Rollback activos: {rb_count}"
+            text=f"Modelo: {model} | Key: {masked} | Caché: {stats['cached_documents_on_disk']} | {my_status} | Rollback activos: {rb_count}"
         )
 
     def browse_folder(self):

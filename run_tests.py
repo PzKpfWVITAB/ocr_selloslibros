@@ -19,6 +19,7 @@ if __name__ == "__main__":
         suite.addTests(loader.discover(TESTS_DIR, pattern="test_stamp_parser.py"))
         suite.addTests(loader.discover(TESTS_DIR, pattern="test_comparator.py"))
         suite.addTests(loader.discover(TESTS_DIR, pattern="test_sqlite_and_rollback.py"))
+        suite.addTests(loader.discover(TESTS_DIR, pattern="test_mysql_and_folder_tools.py"))
     else:
         # Por defecto ejecuta todos incluyendo integración si existe la ruta
         suite.addTests(loader.discover(TESTS_DIR, pattern="test_*.py"))

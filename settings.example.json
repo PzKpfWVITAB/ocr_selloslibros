@@ -6,5 +6,11 @@
   "early_stop_caratula": true,
   "max_pages_per_doc": 3,
   "image_max_dim": 1400,
-  "jpeg_quality": 82
+  "jpeg_quality": 82,
+  "mysql_enabled": false,
+  "mysql_host": "127.0.0.1",
+  "mysql_port": 3306,
+  "mysql_user": "root",
+  "mysql_password": "",
+  "mysql_database": "trazabilidad_selloslibros"
 }

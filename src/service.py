@@ -14,12 +14,13 @@ from src.core.file_operations import FileOperations
 from src.database.db_manager import DatabaseManager
 from src.parsers.folder_parser import FolderParser
 from src.matcher.comparator import FolderComparator
+from src.database.mysql_manager import MySQLManager
 
 
 class FolderOCRService:
     """
     Servicio integral de Diagnóstico General (Fase 1), Ejecución Física (Fase 2),
-    Auditoría en SQLite ('auditoria_libros.db') y Herramienta de Rollback Total:
+    Auditoría en SQLite ('auditoria_libros.db'), Trazabilidad MySQL y Rollback Total:
     - Filtro de raíz: Solo revisa carpetas con '_' en el primer nivel de la raíz seleccionada
       (ignorando subcarpetas anidadas y carpetas sin '_' como BUENOS y MALOS).
     - Ahorro máximo de tokens en Claude Sonnet 5:
@@ -39,9 +40,18 @@ class FolderOCRService:
         self.cache = CacheManager()
         self.settings = SettingsManager.load()
         self.db = DatabaseManager(db_path=db_path)
+        self.mysql = MySQLManager(self.settings)
 
     def reload_settings(self) -> Dict[str, Any]:
         self.settings = SettingsManager.load()
+        self.mysql.update_config(
+            host=str(self.settings.get("mysql_host", "127.0.0.1")),
+            port=int(self.settings.get("mysql_port", 3306)),
+            user=str(self.settings.get("mysql_user", "root")),
+            password=str(self.settings.get("mysql_password", "")),
+            database=str(self.settings.get("mysql_database", "trazabilidad_selloslibros")),
+            enabled=bool(self.settings.get("mysql_enabled", False))
+        )
         return self.settings
 
     @staticmethod
@@ -571,6 +581,19 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"✏️ Renombrada ({res['new_folder_name']})"
         diag_result["files_modified_count"] = res["files_renamed_count"]
+
+        if self.mysql and self.mysql.enabled:
+            self.mysql.registrar_movimiento_carpeta(
+                tipo_movimiento="RENOMBRADO_AUDITORIA",
+                nombre_origen=old_name,
+                nombre_destino=res["new_folder_name"],
+                ruta_origen=str(folder_path),
+                ruta_destino=res["new_folder_path"],
+                primer_pdf_referencia=res.get("new_folder_name"),
+                motivo=f"Renombrado por auditoría ({res['files_renamed_count']} PDFs)",
+                indice_colision=res.get("collision_index", 0)
+            )
+
         return res
 
     def execute_move_to_apartados(
@@ -620,6 +643,18 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"📦 Apartada ({error_sub})"
         diag_result["files_modified_count"] = res["files_moved_count"]
+
+        if self.mysql and self.mysql.enabled:
+            self.mysql.registrar_movimiento_carpeta(
+                tipo_movimiento="APARTADO_REVISION",
+                nombre_origen=Path(str(folder_path)).name,
+                nombre_destino=new_p.name,
+                ruta_origen=str(folder_path),
+                ruta_destino=str(new_p),
+                motivo=f"Apartado por {error_sub}",
+                indice_colision=res.get("collision_index", 0)
+            )
+
         return res
 
     def execute_move_to_validados(self, diag_result: Dict[str, Any], validados_dir: str) -> Dict[str, Any]:
@@ -652,6 +687,18 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = "✅ Movida a Correctos"
         diag_result["files_modified_count"] = res["files_moved_count"]
+
+        if self.mysql and self.mysql.enabled:
+            self.mysql.registrar_movimiento_carpeta(
+                tipo_movimiento="MOVIDO_A_CORRECTOS",
+                nombre_origen=Path(str(folder_path)).name,
+                nombre_destino=new_p.name,
+                ruta_origen=str(folder_path),
+                ruta_destino=str(new_p),
+                motivo="Carpeta validada con COINCIDE_TOTAL",
+                indice_colision=res.get("collision_index", 0)
+            )
+
         return res
 
     def rollback_single_file(self, candidate: Dict[str, Any]):

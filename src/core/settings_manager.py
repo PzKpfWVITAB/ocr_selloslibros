@@ -77,6 +77,12 @@ class SettingsManager:
             "max_pages_per_doc": 3,
             "image_max_dim": 1400,
             "jpeg_quality": 82,
+            "mysql_host": os.environ.get("MYSQL_HOST", "") or env_vars.get("MYSQL_HOST", "127.0.0.1"),
+            "mysql_port": int(os.environ.get("MYSQL_PORT", "") or env_vars.get("MYSQL_PORT", 3306)),
+            "mysql_user": os.environ.get("MYSQL_USER", "") or env_vars.get("MYSQL_USER", "root"),
+            "mysql_password": os.environ.get("MYSQL_PASSWORD", "") or env_vars.get("MYSQL_PASSWORD", ""),
+            "mysql_database": os.environ.get("MYSQL_DATABASE", "") or env_vars.get("MYSQL_DATABASE", "trazabilidad_selloslibros"),
+            "mysql_enabled": True if (os.environ.get("MYSQL_ENABLED", "") or env_vars.get("MYSQL_ENABLED", "")).lower() in ["true", "1"] else False,
         }
 
         path = cls.get_settings_path()
