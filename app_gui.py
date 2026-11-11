@@ -592,7 +592,7 @@ class ManualEditDialog(tk.Toplevel):
 
         rows_def = [
             ("1. Delegación (Pos. 1 - Fija):", self.del_val, True, None),
-            ("2. Sección (Pos. 2 - solo 00 o 01..05):", self.sec_var, False, ["00", "01", "02", "03", "04", "05"]),
+            ("2. Sección (Pos. 2 - ej. 00, 01, 02...):", self.sec_var, False, None),
             ("3. Libro (Pos. 3 - ej. 01, 02, 100):", self.lib_var, False, None),
             ("4. Tomo (Pos. 4 - ej. 01, 03, o CREDITO_AGRICOLA, AUXILIAR):", self.tom_var, False, None),
             ("5. Volumen (Pos. 5 - ej. 00, 01, 02):", self.vol_var, False, None),

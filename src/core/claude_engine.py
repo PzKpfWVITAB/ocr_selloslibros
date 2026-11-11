@@ -72,16 +72,36 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
    - Es el año para el cual se autoriza el libro o en que se fecha el acta de apertura (ej. "PARA EL AÑO DE 1986 MIL NOVECIENTOS OCHENTA Y SEIS" -> 1986, "26 DE NOVIEMBRE DE MIL NOVECIENTOS OCHENTA Y TRES" -> 1983).
    - Conviértelo siempre a entero de 4 dígitos.
 
-EJEMPLOS DE SALIDA CORRECTA:
-Ejemplo 1 ("AUTORIZA EL PRESENTE LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE CREDITO AGRICOLA ... PARA EL AÑO DE 1986"):
+========================================================================================
+REGLA DE ORO: SEPARACIÓN TOTAL ENTRE DATOS ESTRUCTURADOS Y COMENTARIOS DE LA IA
+========================================================================================
+1. Envía SIEMPRE tu respuesta estructurada en formato JSON mediante la herramienta 'registrar_datos_caratula'.
+2. El objeto 'datos_estructurados' contiene EXCLUSIVAMENTE los datos numéricos y categóricos que
+   servirán para construir el código registral de 7 posiciones.
+3. Tus comentarios, observaciones o notas sobre lo que NO contiene el documento (ejemplo:
+   "Distrito judicial sin especificar fraccionamiento o auxiliar", "No se menciona sección", etc.)
+   DEBEN ir ÚNICAMENTE en el campo 'comentarios_ia'. NUNCA los mezcles con los datos útiles.
+4. NUNCA alteres ni pongas 'es_auxiliar': true por notas de ausencia. Si la palabra "AUXILIAR" no
+   está literalmente impresa o escrita en el sello, 'es_auxiliar' DEBE ser false y 'tomo' NUNCA
+   puede ser 'AUXILIAR'.
+5. Las 'evidencias' son exclusivamente citas textuales afirmativas entre comillas ('...').
+
+EJEMPLOS DE SALIDA ESTRUCTURADA EN FORMATO JSON:
+
+Ejemplo 1 (Crédito Agrícola - Sección alfanumérica en Tomo):
 {
-  "seccion": null,
-  "libro": 2,
-  "tomo": "CREDITO_AGRICOLA",
-  "volumen": null,
-  "fraccionamiento": null,
-  "anio": 1986,
-  "es_auxiliar": false,
+  "transcripcion_literal": "EL CIUDADANO JUEZ DE PRIMERA INSTANCIA DEL RAMO CIVIL... AUTORIZA EL PRESENTE LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE CREDITO AGRICOLA... PARA EL AÑO DE 1986",
+  "datos_estructurados": {
+    "seccion": null,
+    "libro": 2,
+    "tomo": "CREDITO_AGRICOLA",
+    "volumen": null,
+    "fraccionamiento": null,
+    "anio": 1986,
+    "es_auxiliar": false
+  },
+  "comentarios_ia": "Distrito Judicial de Tuxtla Gutiérrez.",
+  "texto_descriptivo": "Acta de apertura de libro de Crédito Agrícola para 1986.",
   "evidencias": [
     "Libro detectado: 'LIBRO NUMERO 2 DOS' -> libro=2",
     "Sección alfanumérica colocada en posición de Tomo: 'SECCION DE CREDITO AGRICOLA' -> tomo='CREDITO_AGRICOLA'",
@@ -89,15 +109,42 @@ Ejemplo 1 ("AUTORIZA EL PRESENTE LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE L
   ]
 }
 
-Ejemplo 2 ("AUTORIZA EL PRESENTE LIBRO NUMERO 02 VOLUMEN I AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS ... 22 DE JUNIO DE 1990"):
+Ejemplo 2 (Libro normal con Tomo numérico, Libro numérico, Sección 1 y Año 1992):
 {
-  "seccion": null,
-  "libro": 2,
-  "tomo": "AUXILIAR",
-  "volumen": 1,
-  "fraccionamiento": "FRACCIONAMIENTOS_Y_COLONIAS",
-  "anio": 1990,
-  "es_auxiliar": true,
+  "transcripcion_literal": "AUTORIZA EL PRESENTE LIBRO NUMERO 1 UNO TOMO III CORRESPONDIENTE A LA SECCION PRIMERA DEL REGISTRO PUBLICO DE LA PROPIEDAD Y DE COMERCIO... PARA EL AÑO DE 1992",
+  "datos_estructurados": {
+    "seccion": 1,
+    "libro": 1,
+    "tomo": 3,
+    "volumen": null,
+    "fraccionamiento": null,
+    "anio": 1992,
+    "es_auxiliar": false
+  },
+  "comentarios_ia": "Distrito Judicial de Tuxtla Gutiérrez sin fraccionamiento ni auxiliar.",
+  "texto_descriptivo": "Libro 1 Tomo III de la Sección Primera para el año de 1992.",
+  "evidencias": [
+    "Sección detectada: 'SECCION PRIMERA' -> seccion=1",
+    "Libro detectado: 'LIBRO NUMERO 1 UNO' -> libro=1",
+    "Tomo detectado: 'TOMO III' -> tomo=3",
+    "Año detectado: 'PARA EL AÑO DE 1992' -> anio=1992"
+  ]
+}
+
+Ejemplo 3 (Libro AUXILIAR real donde la palabra 'AUXILIAR' SÍ aparece escrita):
+{
+  "transcripcion_literal": "AUTORIZA EL PRESENTE LIBRO NUMERO 02 VOLUMEN I AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS... 22 DE JUNIO DE 1990",
+  "datos_estructurados": {
+    "seccion": null,
+    "libro": 2,
+    "tomo": "AUXILIAR",
+    "volumen": 1,
+    "fraccionamiento": "FRACCIONAMIENTOS_Y_COLONIAS",
+    "anio": 1990,
+    "es_auxiliar": true
+  },
+  "comentarios_ia": "Libro Auxiliar con materia de Fraccionamientos y Colonias.",
+  "texto_descriptivo": "Libro número 02 volumen I Auxiliar de Fraccionamientos y Colonias de 1990.",
   "evidencias": [
     "Libro detectado: 'LIBRO NUMERO 02' -> libro=2",
     "Categoría Auxiliar en posición de Tomo: 'AUXILIAR' -> tomo='AUXILIAR'",
@@ -107,7 +154,7 @@ Ejemplo 2 ("AUTORIZA EL PRESENTE LIBRO NUMERO 02 VOLUMEN I AUXILIAR DE FRACCIONA
   ]
 }
 
-Responde ÚNICAMENTE con el objeto JSON válido, sin texto adicional fuera del JSON.
+Responde ÚNICAMENTE con el objeto JSON válido de la herramienta, sin texto adicional fuera del JSON.
 """
 
 MODEL_FALLBACK_CHAIN = [
@@ -121,8 +168,10 @@ MODEL_FALLBACK_CHAIN = [
 STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
     "name": "registrar_datos_caratula",
     "description": (
-        "Transcribe literalmente el texto del sello/acta de apertura y extrae sus datos. "
-        "REGLA ESTRICTA: Si la palabra 'AUXILIAR' NO aparece explícitamente escrita en el documento, "
+        "Envía en formato JSON estructurado exclusivamente los datos registrales objetivos de la carátula. "
+        "Separa estrictamente los datos útiles verificados de cualquier comentario o nota interna, "
+        "para que ningún comentario de ausencia ('sin especificar...', 'no se menciona...') pueda confundirse con los datos del libro. "
+        "REGLA ESTRICTA: Si la palabra 'AUXILIAR' NO aparece explícitamente escrita en el documento visible, "
         "'es_auxiliar' DEBE ser false y 'tomo' NUNCA puede ser 'AUXILIAR'."
     ),
     "input_schema": {
@@ -172,7 +221,7 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                     },
                     "es_auxiliar": {
                         "type": "boolean",
-                        "description": "true ÚNICAMENTE si la palabra 'AUXILIAR' aparece explícitamente escrita en el texto del acta; false en cualquier otro caso.",
+                        "description": "true ÚNICAMENTE si la palabra 'AUXILIAR' aparece explícitamente escrita en el texto visible del documento; false en cualquier otro caso.",
                     },
                 },
                 "required": [
@@ -185,6 +234,14 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                     "es_auxiliar",
                 ],
             },
+            "comentarios_ia": {
+                "type": "string",
+                "description": (
+                    "Comentarios, observaciones o notas de la IA sobre lo que NO aparece en el documento "
+                    "(ej. 'distrito judicial sin especificar fraccionamiento ni auxiliar', 'no se especifica tomo'). "
+                    "Este campo está aislado para no confundir comentarios con los datos estructurados."
+                ),
+            },
             "texto_descriptivo": {
                 "type": "string",
                 "description": "Resumen descriptivo claro en español de lo que autoriza el sello o acta de apertura.",
@@ -193,12 +250,12 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Citas textuales literales entre comillas simples ('...') extraídas de la imagen que respaldan cada campo detectado. "
-                    "PROHIBIDO incluir notas sobre datos que NO aparecen (nunca escribas 'sin especificar auxiliar' ni 'no se menciona auxiliar')."
+                    "Citas textuales literales afirmativas entre comillas simples ('...') extraídas de la imagen que respaldan cada campo detectado. "
+                    "PROHIBIDO incluir notas sobre datos que NO aparecen."
                 ),
             },
         },
-        "required": ["transcripcion_literal", "datos_estructurados", "texto_descriptivo", "evidencias"],
+        "required": ["transcripcion_literal", "datos_estructurados", "evidencias"],
     },
 }
 
@@ -265,9 +322,10 @@ class ClaudeVisionEngine:
         content_blocks.append({
             "type": "text",
             "text": (
-                "Extrae los datos registrales (seccion, libro, tomo, volumen, fraccionamiento, anio, es_auxiliar, evidencias) "
-                "aplicando las reglas de posición de Tomo para secciones alfanuméricas (CREDITO_AGRICOLA, ACTOS_Y_CONTRATOS, AUXILIAR) "
-                "y responde únicamente con el objeto JSON."
+                "Extrae exclusivamente los datos registrales objetivos en formato JSON estructurado llamando a 'registrar_datos_caratula'. "
+                "Separa estrictamente los datos verificados de cualquier comentario o nota interna en 'comentarios_ia'. "
+                "REGLA CRÍTICA: Si la palabra 'AUXILIAR' no está explícitamente escrita en el documento visible, "
+                "'es_auxiliar' DEBE ser false y 'tomo' jamás puede ser 'AUXILIAR'."
             )
         })
 
@@ -432,7 +490,7 @@ class ClaudeVisionEngine:
         positive_lines: List[str] = []
         for item in evidencias:
             s_item = str(item).strip()
-            if not s_item or s_item.startswith(("⚡", "🤖", "📄", "📝 Resumen:")):
+            if not s_item or s_item.startswith(("⚡", "🤖", "📄", "📝", "💬")):
                 continue
             if cls._is_negative_or_absence_line(s_item):
                 continue
@@ -462,7 +520,7 @@ class ClaudeVisionEngine:
 
         for item in evidencias:
             s_item = str(item).strip()
-            if not s_item or s_item.startswith(("⚡", "🤖", "📄", "📝 Resumen:")):
+            if not s_item or s_item.startswith(("⚡", "🤖", "📄", "📝", "💬")):
                 continue
             if cls._is_negative_or_absence_line(s_item):
                 continue
@@ -600,13 +658,27 @@ class ClaudeVisionEngine:
             evidencias = [str(evidencias)]
 
         texto_descriptivo = str(data.get("texto_descriptivo") or "").strip()
+        comentarios_ia = str(data.get("comentarios_ia") or "").strip()
+        if not texto_descriptivo and comentarios_ia:
+            texto_descriptivo = comentarios_ia
+
         if texto_descriptivo:
             resumen_item = f"📝 Resumen: {texto_descriptivo}"
             if not any(str(ev).startswith("📝 Resumen:") for ev in evidencias):
                 evidencias = [resumen_item] + list(evidencias)
 
-        has_structured = isinstance(data.get("datos_estructurados"), dict)
-        fields_src: Dict[str, Any] = dict(data["datos_estructurados"]) if has_structured else dict(data)
+        if comentarios_ia and comentarios_ia != texto_descriptivo:
+            nota_item = f"💬 Observación IA: {comentarios_ia}"
+            if not any(str(ev).startswith("💬 Observación IA:") for ev in evidencias):
+                evidencias.append(nota_item)
+
+        has_structured = isinstance(data.get("datos_estructurados"), dict) or isinstance(data.get("datos_extraidos"), dict)
+        if isinstance(data.get("datos_estructurados"), dict):
+            fields_src: Dict[str, Any] = dict(data["datos_estructurados"])
+        elif isinstance(data.get("datos_extraidos"), dict):
+            fields_src: Dict[str, Any] = dict(data["datos_extraidos"])
+        else:
+            fields_src = dict(data)
         evidencias_joined = "" if has_structured else cls._extract_positive_evidencias_text(evidencias)
 
         # 1. Sección: SOLO puede ser numérica (1..5) o None. Si viene texto alfanumérico, va a Tomo.

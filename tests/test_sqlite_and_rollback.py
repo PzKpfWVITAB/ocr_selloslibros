@@ -482,6 +482,58 @@ class TestSQLiteCaratulaAndRollback(unittest.TestCase):
         self.assertEqual(parsed_h["tomo"], 3)
         self.assertIsNone(parsed_h["volumen"])
 
+    def test_09_isolated_comentarios_ia_in_json(self):
+        """
+        Verifica que los comentarios de la IA ('comentarios_ia') sobre ausencia de datos
+        ('sin especificar auxiliar', 'no menciona fraccionamiento') estén estrictamente
+        aislados y NUNCA contaminen los datos numéricos y categóricos que nos sirven a nosotros.
+        """
+        raw_json_with_comments = """{
+            "transcripcion_literal": "AUTORIZA EL PRESENTE LIBRO NUMERO 1 UNO TOMO III CORRESPONDIENTE A LA SECCION PRIMERA DEL REGISTRO PUBLICO DE LA PROPIEDAD Y DE COMERCIO PARA EL AÑO DE 1992",
+            "datos_estructurados": {
+                "seccion": 1,
+                "libro": 1,
+                "tomo": 3,
+                "volumen": null,
+                "fraccionamiento": null,
+                "anio": 1992,
+                "es_auxiliar": false
+            },
+            "comentarios_ia": "Distrito Judicial de Tuxtla Gutiérrez sin especificar fraccionamiento o auxiliar. No se menciona libro auxiliar.",
+            "texto_descriptivo": "Libro 1 Tomo III de la Sección Primera para 1992.",
+            "evidencias": [
+                "Libro detectado: 'LIBRO NUMERO 1 UNO' -> libro=1",
+                "Tomo detectado: 'TOMO III' -> tomo=3",
+                "Sección detectada: 'SECCION PRIMERA' -> seccion=1",
+                "Año detectado: 'PARA EL AÑO DE 1992' -> anio=1992"
+            ]
+        }"""
+        parsed = ClaudeVisionEngine._parse_claude_json(raw_json_with_comments)
+
+        # Los datos estructurados deben ser exactos e inalterados
+        self.assertEqual(parsed["seccion"], 1)
+        self.assertEqual(parsed["libro"], 1)
+        self.assertEqual(parsed["tomo"], 3)
+        self.assertIsNone(parsed["volumen"])
+        self.assertIsNone(parsed["fraccionamiento"])
+        self.assertEqual(parsed["anio"], 1992)
+        self.assertFalse(parsed["es_auxiliar"])
+
+        # El código construido debe ser exactamente 01_01_01_03_00_00_1992 (COINCIDE TOTAL)
+        code = FileOperations.build_clean_folder_code(
+            delegacion="01",
+            seccion=parsed["seccion"],
+            libro=parsed["libro"],
+            tomo=parsed["tomo"],
+            volumen=parsed["volumen"],
+            fraccionamiento=parsed["fraccionamiento"],
+            anio=parsed["anio"],
+        )
+        self.assertEqual(code, "01_01_01_03_00_00_1992")
+
+        # El comentario debe estar aislado como observación informativa, sin contaminar datos
+        self.assertTrue(any(ev.startswith("💬 Observación IA:") for ev in parsed["evidencias"]))
+
 
 if __name__ == "__main__":
     unittest.main()
