@@ -440,9 +440,14 @@ class FolderOCRService:
             for k in ("seccion", "libro", "tomo", "volumen", "fraccionamiento", "anio")
         )
 
-        # REINTENTO AUTOMÁTICO (FALLBACK): Si no se encontró información y la carátula tiene páginas adicionales
-        # que no se enviaron inicialmente (ej. si c_total_pages >= 3 y solo se enviaron [1, 2]):
-        if not found_any_ocr_info and c_total_pages > len(target_pages):
+        folder_libro_norm = FolderComparator._normalize_for_comparison(folder_data.get("libro_val"))
+        has_valid_libro = str(ocr_final.get("libro", "00")).strip() not in ("00", "0", "0000", "", "None", "-", "null")
+        is_folder_libro_zero = (folder_libro_norm == 0)
+        sin_datos_estructurales = (is_folder_libro_zero and not has_valid_libro)
+
+        # REINTENTO AUTOMÁTICO (FALLBACK): Si no se encontró información (o solo año sin datos de libro)
+        # y la carátula tiene páginas adicionales que no se enviaron inicialmente (ej. si c_total_pages >= 3 y solo se enviaron [1, 2]):
+        if (not found_any_ocr_info or sin_datos_estructurales) and c_total_pages > len(target_pages):
             fallback_pages = [p for p in range(1, min(c_total_pages + 1, 4)) if p not in target_pages]
             if fallback_pages:
                 fb_pages = ImageExtractor.extract_pages_by_numbers(
@@ -490,19 +495,29 @@ class FolderOCRService:
                         ocr_final = FolderComparator.synthesize_detections(doc_results)
                         comparison = FolderComparator.compare(folder_data, ocr_final)
                         found_any_ocr_info = True
+                        has_valid_libro = str(ocr_final.get("libro", "00")).strip() not in ("00", "0", "0000", "", "None", "-", "null")
+                        sin_datos_estructurales = (is_folder_libro_zero and not has_valid_libro)
 
         # Criterio estricto para Carátula Embebida:
         # Solo se considera Carátula Válida si contiene datos objetivos de apertura de libro (Libro y Año válidos).
         is_embedded_candidate = (c_status == "CARATULA_EMBEBIDA_CANDIDATA")
+        has_valid_anio = str(ocr_final.get("anio", "0000")).strip() not in ("0000", "0", "00", "", "None", "-", "null")
         is_valid_embedded_caratula = False
         if is_embedded_candidate:
-            has_valid_libro = str(ocr_final.get("libro", "00")).strip() not in ("00", "0", "0000", "", "None", "-", "null")
-            has_valid_anio = str(ocr_final.get("anio", "0000")).strip() not in ("0000", "0", "00", "", "None", "-", "null")
             is_valid_embedded_caratula = found_any_ocr_info and has_valid_libro and has_valid_anio
+
+        # Criterio de Carátula Sin Datos Estructurales de Libro:
+        # Si la carpeta tiene el campo libro en ceros (00) y la carátula NO contiene un Libro válido,
+        # la carátula carece de los metadatos estructurales de apertura de libro (ej. es un título de propiedad,
+        # folio individual, hoja sin acta, etc.). En este caso, aunque se haya extraído un año aislado,
+        # NO es información suficiente para validar la carpeta como correcta. Debe apartarse a 'CARATULA SIN DATOS'.
+        folder_libro_norm = FolderComparator._normalize_for_comparison(folder_data.get("libro_val"))
+        is_folder_libro_zero = (folder_libro_norm == 0)
+        sin_datos_estructurales = (is_folder_libro_zero and not has_valid_libro)
 
         embedded_to_create = None
 
-        if not found_any_ocr_info or (is_embedded_candidate and not is_valid_embedded_caratula):
+        if not found_any_ocr_info or sin_datos_estructurales or (is_embedded_candidate and not is_valid_embedded_caratula):
             if is_embedded_candidate:
                 # Regla solicitada: Si se probó la página 1 compartida pero no resultó ser una carátula válida
                 # (o es un documento particular/en blanco sin datos de libro), NO se pasa a correctos: se aparta.
@@ -518,19 +533,25 @@ class FolderOCRService:
                     f"(Libro={ocr_final.get('libro')}, Año={ocr_final.get('anio')}). Se clasifica para revisión en '{subcarpeta_revision}'."
                 )
             else:
-                # Regla normal: Si no se encuentra información alguna en la carátula,
-                # dejar el nombre de la carpeta tal cual, solo limpiándolo hasta el año
-                # (y adaptándolo con _2, _3 si hay colisiones al renombrar o apartar).
+                # Regla normal: Si no se encuentra información suficiente de libro en la carátula,
+                # dejar el nombre de la carpeta tal cual, solo limpiándolo hasta el año.
                 codigo_sugerido = clean_current_code
                 needs_page_replacement = (c_status == "REEMPLAZABLE_HOJA_BLANCA" or len(insp.get("replaceable_pdfs", [])) > 0)
                 needs_rename = (folder_p.name != clean_current_code)
                 veredicto_global = "SIN_INFO_LIMPIAR_NOMBRE" if needs_rename else "SIN_INFO_MANTENER_NOMBRE"
                 subcarpeta_revision = "CARATULA SIN DATOS"
                 needs_apartar = True
-                ocr_final["evidencias_globales"].append(
-                    f"ℹ Sin información extraíble en carátula (revisadas pág(s). {pages_label}): se conserva el nombre actual limpio ('{clean_current_code}') "
-                    f"y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
-                )
+                if sin_datos_estructurales and found_any_ocr_info:
+                    ocr_final["evidencias_globales"].append(
+                        f"⚠ [CARÁTULA SIN DATOS DE LIBRO] La carátula no contiene acta de apertura con datos de Libro válidos "
+                        f"(Libro={ocr_final.get('libro')}, Año={ocr_final.get('anio')}). Al estar la carpeta en ceros ('{clean_current_code}'), "
+                        f"se conserva el nombre actual y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
+                    )
+                else:
+                    ocr_final["evidencias_globales"].append(
+                        f"ℹ Sin información extraíble en carátula (revisadas pág(s). {pages_label}): se conserva el nombre actual limpio ('{clean_current_code}') "
+                        f"y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
+                    )
         else:
             # Construir el código base sugerido hasta el Año (conservando siempre posición 1 = Delegación)
             codigo_sugerido = FileOperations.build_clean_folder_code(
@@ -565,6 +586,10 @@ class FolderOCRService:
                     veredicto_global = "RELLENO_DE_CEROS_PROPUESTO"
                 else:
                     veredicto_global = "RENOMBRAR_CARPETA"
+            elif comp_veredicto == "SIN_DATOS_CARATULA":
+                needs_apartar = True
+                veredicto_global = "SIN_INFO_LIMPIAR_NOMBRE" if needs_rename else "SIN_INFO_MANTENER_NOMBRE"
+                subcarpeta_revision = "CARATULA SIN DATOS"
             elif needs_page_replacement and comp_veredicto == "COINCIDE_TOTAL" and not needs_rename:
                 veredicto_global = "REEMPLAZAR_HOJA_BLANCA"
             elif needs_page_replacement and needs_rename:

@@ -57,5 +57,27 @@ class TestComparator(unittest.TestCase):
         self.assertEqual(comp["detalles_campos"]["libro"]["estado"], "CARPETA_EN_CEROS")
         self.assertEqual(comp["detalles_campos"]["volumen"]["estado"], "COINCIDE")
 
+    def test_compare_zeros_both_sides_no_valid_libro(self):
+        # Caso 2002: Carpeta en ceros y OCR solo detectó año (libro en 00 en ambos lados)
+        # Jamás debe ser COINCIDE_TOTAL, debe ser SIN_DATOS_CARATULA
+        folder_data = {
+            "seccion_val": 0,
+            "libro_val": 0,
+            "tomo_val": 0,
+            "volumen_val": 0,
+            "anio_val": 2002
+        }
+        ocr_final = {
+            "seccion": "00",
+            "libro": "00",
+            "tomo": "00",
+            "volumen": "00",
+            "anio": 2002
+        }
+        comp = FolderComparator.compare(folder_data, ocr_final)
+        self.assertEqual(comp["veredicto"], "SIN_DATOS_CARATULA")
+        self.assertEqual(comp["detalles_campos"]["libro"]["estado"], "AMBOS_EN_CEROS")
+        self.assertEqual(comp["detalles_campos"]["anio"]["estado"], "COINCIDE")
+
 if __name__ == "__main__":
     unittest.main()

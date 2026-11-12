@@ -574,7 +574,7 @@ class FileOperations:
             return "SIN ARCHIVO CARATULA"
         if c_st == "PDFS_SIN_CARATULA" or ver == "DISCREPANCIA_SIN_CARATULA":
             return "PDFS SIN CARATULA"
-        if not found_any_ocr_info or ver in ("SIN_INFO_MANTENER_NOMBRE", "SIN_INFO_LIMPIAR_NOMBRE"):
+        if not found_any_ocr_info or ver in ("SIN_INFO_MANTENER_NOMBRE", "SIN_INFO_LIMPIAR_NOMBRE", "SIN_DATOS_CARATULA"):
             return "CARATULA SIN DATOS"
         if c_st == "REEMPLAZABLE_HOJA_BLANCA" or "REEMPLAZAR_HOJA" in ver:
             return "HOJA BLANCA EN PDFS"

@@ -3581,6 +3581,9 @@ class OCRLibrosApp(tk.Tk):
             elif estado == "CARPETA_EN_CEROS":
                 tag = "zeros"
                 estado_str = "★ Carpeta en 00"
+            elif estado == "AMBOS_EN_CEROS":
+                tag = "diff"
+                estado_str = "⚠ Ambos en 00 (Sin Libro)"
             else:
                 estado_str = estado
 

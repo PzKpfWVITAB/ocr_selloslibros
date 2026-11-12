@@ -794,6 +794,67 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertTrue((f_test / "01_00_00_00_00_00_0000_0002_00_DUP1.pdf").exists())
         self.assertTrue((f_test / "REG_SPEC.pdf").exists())
 
+    def test_18_folder_in_ceros_with_only_year_detected_routes_to_apartados_not_coincide_total(self):
+        """
+        Verifica el caso específico reportado de carpetas en ceros (ej. 01_00_00_00_00_00_2002):
+        Cuando la carátula corresponde a un título de propiedad u otro documento donde Claude
+        solo detecta el año (2002) pero NO detecta libro ni sección (libro=00, seccion=00),
+        la carpeta NUNCA debe marcarse como COINCIDE_TOTAL.
+        Debe clasificarse como SIN_INFO_MANTENER_NOMBRE (o SIN_INFO_LIMPIAR_NOMBRE si tiene sufijo),
+        con needs_apartar=True y subcarpeta 'CARATULA SIN DATOS'.
+        """
+        from src.service import FolderOCRService
+
+        f_clean = self.temp_dir / "01_00_00_00_00_00_2002"
+        f_clean.mkdir(parents=True, exist_ok=True)
+
+        c_text = "TITULO DE PROPIEDAD NUMERO 72152 DEL DIA 25 DEL MES DE ENERO DEL AÑO 2002"
+        self._create_dummy_pdf(f_clean / "01_00_00_00_00_00_2002_CARATULA_00.pdf", text=c_text)
+        self._create_dummy_pdf(f_clean / "01_00_00_00_00_00_0000_0001_00.pdf", text=c_text)
+
+        # Mock de Claude: solo detecta año=2002, libro=None, seccion=None
+        mock_parsed = {
+            "seccion": None,
+            "libro": None,
+            "tomo": None,
+            "volumen": None,
+            "fraccionamiento": None,
+            "anio": 2002,
+            "es_auxiliar": False,
+            "texto_descriptivo": "Inscripción de título de propiedad número 72152 de 2002.",
+            "evidencias": ["Fecha detectada: '2002' -> anio=2002"]
+        }
+        mock_usage = {"input_tokens": 500, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_2002_ceros.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_clean), save_to_db=True)
+
+        # Verificaciones críticas:
+        self.assertNotEqual(diag["veredicto_global"], "COINCIDE_TOTAL")
+        self.assertEqual(diag["veredicto_global"], "SIN_INFO_MANTENER_NOMBRE")
+        self.assertTrue(diag["needs_apartar"])
+        self.assertTrue(diag["has_discrepancy"])
+        self.assertEqual(diag["subcarpeta_revision"], "CARATULA SIN DATOS")
+        self.assertEqual(diag["codigo_base_sugerido"], "01_00_00_00_00_00_2002")
+        self.assertEqual(diag["comparacion"]["veredicto"], "SIN_DATOS_CARATULA")
+
+        # Caso con sufijo: 01_00_00_00_00_00_2002_REVISAR_SEPARADO
+        f_suffix = self.temp_dir / "01_00_00_00_00_00_2002_REVISAR_SEPARADO"
+        f_suffix.mkdir(parents=True, exist_ok=True)
+        self._create_dummy_pdf(f_suffix / "01_00_00_00_00_00_2002_CARATULA_00.pdf", text=c_text)
+        self._create_dummy_pdf(f_suffix / "01_00_00_00_00_00_0000_0001_00.pdf", text=c_text)
+
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag_suffix = service.process_folder(str(f_suffix), save_to_db=True)
+
+        self.assertNotEqual(diag_suffix["veredicto_global"], "COINCIDE_TOTAL")
+        self.assertEqual(diag_suffix["veredicto_global"], "SIN_INFO_LIMPIAR_NOMBRE")
+        self.assertTrue(diag_suffix["needs_apartar"])
+        self.assertTrue(diag_suffix["needs_rename"])
+        self.assertEqual(diag_suffix["codigo_base_sugerido"], "01_00_00_00_00_00_2002")
+        self.assertEqual(diag_suffix["subcarpeta_revision"], "CARATULA SIN DATOS")
+
 
 if __name__ == "__main__":
     unittest.main()

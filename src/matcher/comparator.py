@@ -136,8 +136,11 @@ class FolderComparator:
             is_ocr_zero = (norm_ocr == 0)
 
             if is_folder_zero and is_ocr_zero:
-                estado = "COINCIDE"
-                coincidencias.append(nombre_campo)
+                if nombre_campo == "libro":
+                    estado = "AMBOS_EN_CEROS"
+                else:
+                    estado = "COINCIDE"
+                    coincidencias.append(nombre_campo)
             elif is_folder_zero and not is_ocr_zero:
                 estado = "CARPETA_EN_CEROS"
                 propuestas_ceros.append(f"{nombre_campo.capitalize()}: Carpeta=00 -> Detectado={val_ocr}")
@@ -157,10 +160,17 @@ class FolderComparator:
                 "estado": estado
             }
 
+        norm_ocr_libro = cls._normalize_for_comparison(ocr_final.get("libro"))
+        norm_folder_libro = cls._normalize_for_comparison(folder_data.get("libro_val"))
+
         if discrepancias:
             veredicto = "DISCREPANCIA"
         elif propuestas_ceros:
             veredicto = "RELLENO_DE_CEROS_PROPUESTO"
+        elif norm_ocr_libro == 0 and norm_folder_libro == 0:
+            # Si tanto la carpeta como el OCR tienen libro en ceros (o no detectado),
+            # NO es una coincidencia registral válida: la carátula carece de libro identificado.
+            veredicto = "SIN_DATOS_CARATULA"
         elif coincidencias:
             veredicto = "COINCIDE_TOTAL"
         else:
