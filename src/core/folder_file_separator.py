@@ -34,8 +34,9 @@ class FolderFileSeparator:
         stem = Path(pdf_name).stem
         is_caratula = bool(re.search(r"CARATULA", stem, re.IGNORECASE))
 
-        # Quitar sufijo de carátula para obtener la base limpia
+        # Quitar sufijos de carátula y duplicados (_DUP, _DUP1, etc.) para obtener la base limpia
         clean_stem = re.sub(r"_CARATULA.*$", "", stem, flags=re.IGNORECASE)
+        clean_stem = re.sub(r"[_+-]DUP\d*.*$", "", clean_stem, flags=re.IGNORECASE)
 
         tokens = clean_stem.split("_")
 

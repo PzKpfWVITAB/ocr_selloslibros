@@ -39,6 +39,16 @@ class FolderRenamerByFirstPdf:
 
         return None
 
+    @staticmethod
+    def is_duplicate_pdf_name(filename: str) -> bool:
+        """
+        Detecta si el archivo PDF tiene indicación de duplicado como _DUP, _DUP1, _DUP2, etc.
+        Estos archivos se salen del formato oficial y no deben seleccionarse como el primer PDF
+        para nombrar la carpeta, debiendo tomarse el siguiente archivo en formato estándar.
+        """
+        stem = Path(filename).stem
+        return bool(re.search(r"[_+-]DUP\d*(\.pdf)?$", stem, re.IGNORECASE)) or "_DUP" in stem.upper()
+
     @classmethod
     def get_first_pdf_code_up_to_year(
         cls,
@@ -48,15 +58,18 @@ class FolderRenamerByFirstPdf:
         """
         A partir del nombre del primer PDF y la carpeta original, extrae el código base hasta el año.
         Si el año del PDF es '0000', se recupera el año de la carpeta original.
+        Limpia automáticamente cualquier sufijo de duplicado (_DUP, _DUP1, etc.) si estuviera presente.
 
         Retorna:
             (codigo_sugerido, razon_o_detalle)
         """
         name_no_ext = Path(first_pdf_name).stem
 
+        # Quitar sufijos de duplicado (_DUP, _DUP1, etc.) si vinieran en el nombre
+        clean_name = re.sub(r"[_+-]DUP\d*.*$", "", name_no_ext, flags=re.IGNORECASE)
+
         # Quitar sufijos de copia o carátula si los tuviera
-        # Ej. 01_05_01_CREDITO_AGRICOLA_00_00_1981_0176_00 -> tokens
-        tokens = name_no_ext.split("_")
+        tokens = clean_name.split("_")
         if len(tokens) < 4:
             return None, "El archivo PDF no tiene suficientes segmentos separados por guion bajo."
 
@@ -143,13 +156,22 @@ class FolderRenamerByFirstPdf:
                 "message": "La carpeta no contiene archivos PDF."
             }
 
-        # Buscar el primer PDF que cumpla con la estructura de libro válida con año
-        # (omitiendo archivos irregulares como 'REG_-60.pdf' o carátulas sin código)
+        # Buscar el primer PDF que cumpla con la estructura de libro válida con año,
+        # OMITIENDO:
+        # 1. Archivos duplicados (_DUP, _DUP1, etc. que se salen del formato oficial)
+        # 2. Carátulas (CARATULA)
+        # 3. Archivos irregulares fuera de estándar
+        # Se toma el siguiente archivo que sí cumpla con el formato estándar.
         target_pdf = None
         base_code = None
         detail = ""
 
+        # Prioridad 1: PDFs regulares limpios (sin _DUP y sin CARATULA)
         for p in pdfs:
+            if self.is_duplicate_pdf_name(p.name):
+                continue
+            if "CARATULA" in p.name.upper():
+                continue
             code_cand, det_cand = self.get_first_pdf_code_up_to_year(p.name, folder_path.name)
             if code_cand:
                 target_pdf = p
@@ -157,7 +179,29 @@ class FolderRenamerByFirstPdf:
                 detail = det_cand
                 break
 
-        # Si ninguno cumplió estructura con año, fallback al primer PDF
+        # Prioridad 2: Si no hubo PDFs regulares limpios, buscar PDFs sin _DUP (incluso con CARATULA)
+        if not target_pdf:
+            for p in pdfs:
+                if self.is_duplicate_pdf_name(p.name):
+                    continue
+                code_cand, det_cand = self.get_first_pdf_code_up_to_year(p.name, folder_path.name)
+                if code_cand:
+                    target_pdf = p
+                    base_code = code_cand
+                    detail = det_cand
+                    break
+
+        # Prioridad 3: Fallback de seguridad (si todos los PDFs tuvieran _DUP)
+        if not target_pdf:
+            for p in pdfs:
+                code_cand, det_cand = self.get_first_pdf_code_up_to_year(p.name, folder_path.name)
+                if code_cand:
+                    target_pdf = p
+                    base_code = code_cand
+                    detail = f"{det_cand} (Tomado de {p.name} omitiendo sufijo DUP)"
+                    break
+
+        # Fallback si ninguno cumplió estructura con año
         if not target_pdf:
             target_pdf = pdfs[0]
             base_code, detail = self.get_first_pdf_code_up_to_year(target_pdf.name, folder_path.name)
@@ -179,6 +223,11 @@ class FolderRenamerByFirstPdf:
 
         needs_rename = (folder_path.name != final_name)
 
+        dup_files = [p.name for p in pdfs if self.is_duplicate_pdf_name(p.name)]
+        if dup_files:
+            dup_msg = f"{len(dup_files)} archivo(s) DUP detectados (se mantendrán con _DUP para revisión manual)"
+            detail = f"{detail} | {dup_msg}" if detail != "OK" else dup_msg
+
         return {
             "folder_path": str(folder_path),
             "original_name": folder_path.name,
@@ -191,6 +240,8 @@ class FolderRenamerByFirstPdf:
             "collision_index": col_idx,
             "needs_rename": needs_rename,
             "detail": detail,
+            "dup_files_count": len(dup_files),
+            "dup_files": dup_files,
             "status": "OK" if needs_rename else "YA_TIENE_NOMBRE_CORRECTO"
         }
 

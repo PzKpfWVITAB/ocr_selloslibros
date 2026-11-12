@@ -552,6 +552,12 @@ class DatabaseManager:
                 if q not in searchable:
                     continue
 
+            is_dup_item = ("_DUP" in curr_name.upper() or "_DUP" in orig_name.upper() or "DUP" in c["tipos_movimiento_str"].upper())
+            if is_dup_item:
+                estado_str = "REVISIÓN MANUAL (DUP)"
+            else:
+                estado_str = "MODIFICADO" if changed else "INTACTO"
+
             results.append({
                 "nombre_origen": orig_name,
                 "carpeta_origen": orig_folder,
@@ -566,7 +572,7 @@ class DatabaseManager:
                 "hash_actual": c["hash_actual"],
                 "fecha_ultimo_movimiento": c["ultima_fecha"],
                 "ha_cambiado": changed,
-                "estado_str": "MODIFICADO" if changed else "INTACTO",
+                "estado_str": estado_str,
             })
 
         return results

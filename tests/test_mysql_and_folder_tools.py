@@ -156,6 +156,49 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertTrue((f_test / "REG_-60.pdf").exists())
         self.assertFalse((self.temp_dir / "REG_-60").exists())
 
+    def test_07_skip_duplicate_pdfs_with_dup_suffix_when_renaming(self):
+        """
+        Verifica que si el primer archivo alfabéticamente tiene sufijo de duplicado
+        (_DUP, _DUP1, etc.), el renombrador lo omite y toma el siguiente PDF en
+        formato estándar limpio.
+        """
+        f_dup = self.temp_dir / "0000_01_00_00_00_00_00"
+        f_dup.mkdir()
+
+        # Archivo que viene primero alfabéticamente pero tiene _DUP1
+        self._create_dummy_pdf(f_dup / "01_00_00_00_00_00_0000_0001_00_DUP1.pdf")
+        # Siguiente archivo en formato estándar sin DUP
+        self._create_dummy_pdf(f_dup / "01_00_00_00_00_00_0000_0021_00.pdf")
+
+        renamer = FolderRenamerByFirstPdf()
+        prev = renamer.preview_folder_rename(f_dup)
+
+        self.assertEqual(prev["first_pdf"], "01_00_00_00_00_00_0000_0021_00.pdf")
+        self.assertEqual(prev["suggested_name"], "01_00_00_00_00_00_0000")
+        self.assertTrue(prev["needs_rename"])
+
+        # Verificar que al renombrar los archivos internos:
+        # El archivo DUP NO se omite, se renombra manteniendo su sufijo _DUP1 y se marca para revisión manual
+        from src.core.file_operations import FileOperations
+        from src.database.db_manager import DatabaseManager
+        db = DatabaseManager(self.temp_dir / "test_dup.db")
+        res_rename = FileOperations.rename_folder_and_internal_pdfs(
+            folder_path=f_dup,
+            clean_base_code="01_00_00_00_00_00_1990",
+            db_manager=db
+        )
+        self.assertEqual(res_rename["files_renamed_count"], 2)
+        new_folder = Path(res_rename["new_folder_path"])
+        # Verificar que ambos archivos existen con el nuevo código y el DUP conserva _DUP1
+        self.assertTrue((new_folder / "01_00_00_00_00_00_1990_0001_00_DUP1.pdf").exists())
+        self.assertTrue((new_folder / "01_00_00_00_00_00_1990_0021_00.pdf").exists())
+
+        # Verificar que en SQLite se registró el movimiento marcado como RENOMBRADO_DUP
+        comparison = db.get_traceability_comparison()
+        dup_items = [it for it in comparison if "DUP" in it["nombre_actual"]]
+        self.assertEqual(len(dup_items), 1)
+        self.assertEqual(dup_items[0]["estado_str"], "REVISIÓN MANUAL (DUP)")
+
 
 if __name__ == "__main__":
     unittest.main()

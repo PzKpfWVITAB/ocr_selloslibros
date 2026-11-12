@@ -1073,7 +1073,11 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
                 dest_f = sugg_code if "COINCIDE" in v_global or "CORREGIDA" in v_global else (res.get("subcarpeta_revision") or f_name)
                 pgs = page_counts.get(orig_n, 1)
                 changed = (orig_n != sugg_pdf_n or f_name != dest_f)
-                estado_str = "✔ CONCLUIDO" if es_bien else ("🛠 REEMPLAZABLE" if c_status == "REEMPLAZABLE_HOJA_BLANCA" else "⚠ DISCREPANCIA")
+                is_dup_pf = bool(re.search(r"[_+-]DUP\d*(\.pdf)?$", orig_n, re.IGNORECASE))
+                if is_dup_pf:
+                    estado_str = "ℹ REVISIÓN MANUAL (DUP)"
+                else:
+                    estado_str = "✔ CONCLUIDO" if es_bien else ("🛠 REEMPLAZABLE" if c_status == "REEMPLAZABLE_HOJA_BLANCA" else "⚠ DISCREPANCIA")
                 oper_str = " -> ".join(applied) if applied else ("Renombre Proyectado" if changed else "Sin Cambios")
 
                 comparison_list.append({
@@ -1797,9 +1801,11 @@ class FolderRenamerDialog(tk.Toplevel):
                 tags=(tag,)
             )
 
-        self.lbl_summary.config(
-            text=f"Total: {total_sub} carpetas analizadas  |  {to_rename_cnt} por renombrar  |  {already_ok_cnt} ya correctas"
-        )
+        total_dup_files = sum(item.get("dup_files_count", 0) for item in self.preview_data)
+        summary_txt = f"Total: {total_sub} carpetas analizadas  |  {to_rename_cnt} por renombrar  |  {already_ok_cnt} ya correctas"
+        if total_dup_files > 0:
+            summary_txt += f"  |  ℹ {total_dup_files} archivos DUP detectados (conservan _DUP para revisión)"
+        self.lbl_summary.config(text=summary_txt)
         self.btn_apply.config(state=tk.NORMAL if to_rename_cnt > 0 else tk.DISABLED)
 
     def _apply_renames(self):
@@ -1811,8 +1817,9 @@ class FolderRenamerDialog(tk.Toplevel):
         if not messagebox.askyesno(
             "Confirmar Renombrado Físico",
             f"¿Deseas aplicar el renombrado físico a las {len(items_to_rename)} carpetas?\n\n"
-            f"• Se tomará el nombre del 1er PDF hasta el año.\n"
+            f"• Se tomará el nombre del 1er PDF estándar hasta el año (omitiendo _DUP para el nombre de la carpeta).\n"
             f"• Si el PDF tiene año '0000', se conservará el año de la carpeta original.\n"
+            f"• Los archivos con _DUP mantendrán su sufijo intacto y serán marcados para revisión manual.\n"
             f"• Las colisiones se resolverán con _2 solo en la carpeta.\n"
             f"• MySQL activo: {'Sí' if self.mysql_active_var.get() else 'No'}"
         ):

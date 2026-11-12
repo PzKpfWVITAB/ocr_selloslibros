@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -398,8 +399,13 @@ class FileOperations:
             file_hash = cls.compute_sha256(final_pdf_path)
             pages_cnt = cls.get_pdf_page_count(final_pdf_path)
 
+            is_dup = bool(re.search(r"[_+-]DUP\d*(\.pdf)?$", item["new_name"], re.IGNORECASE))
+            tipo_mov = "RENOMBRADO_DUP" if is_dup else "RENOMBRADO"
+            estado_op = "REVISION_MANUAL_DUP" if is_dup else "EXITOSO"
+            detalles_str = json.dumps({"es_duplicado": True, "marcado_revision_manual": True}) if is_dup else None
+
             db_manager.log_file_movement(
-                tipo_movimiento="RENOMBRADO",
+                tipo_movimiento=tipo_mov,
                 ruta_anterior=item["old_abs_path"],
                 ruta_nueva=final_pdf_path,
                 nombre_anterior=item["old_name"],
@@ -410,7 +416,7 @@ class FileOperations:
             )
             if mysql_manager and getattr(mysql_manager, "enabled", False):
                 mysql_manager.registrar_trazabilidad_archivo(
-                    tipo_operacion="RENOMBRADO",
+                    tipo_operacion=tipo_mov,
                     archivo_nombre_origen=item["old_name"],
                     archivo_nombre_destino=item["new_name"],
                     carpeta_origen=str(folder),
@@ -419,6 +425,8 @@ class FileOperations:
                     ruta_completa_destino=str(final_pdf_path),
                     hash_sha256=file_hash,
                     numero_paginas=pages_cnt,
+                    estado_operacion=estado_op,
+                    detalles_json=detalles_str,
                 )
             logged_files += 1
 

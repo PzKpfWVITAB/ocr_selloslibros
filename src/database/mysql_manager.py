@@ -506,6 +506,12 @@ class MySQLManager:
                     if q not in searchable:
                         continue
 
+                is_dup_item = ("_DUP" in curr_name.upper() or "_DUP" in orig_name.upper() or r.get("estado_operacion") == "REVISION_MANUAL_DUP")
+                if is_dup_item:
+                    estado_str = "REVISIÓN MANUAL (DUP)"
+                else:
+                    estado_str = "MODIFICADO" if changed else "INTACTO"
+
                 results.append({
                     "nombre_origen": orig_name,
                     "carpeta_origen": orig_folder,
@@ -520,7 +526,7 @@ class MySQLManager:
                     "hash_actual": r.get("hash_sha256") or "",
                     "fecha_ultimo_movimiento": str(r.get("fecha_movimiento") or ""),
                     "ha_cambiado": changed,
-                    "estado_str": "MODIFICADO" if changed else "INTACTO",
+                    "estado_str": estado_str,
                 })
 
             return results
