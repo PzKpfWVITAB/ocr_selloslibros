@@ -8,7 +8,6 @@ from typing import Dict, Any, List, Optional, Tuple
 import pymupdf as fitz
 
 from src.core.settings_manager import SettingsManager
-from src.database.db_manager import DatabaseManager
 
 
 class FileOperations:
@@ -214,7 +213,7 @@ class FileOperations:
         caratula_path: Any,
         info_page_num: int,
         replaceable_pdfs: List[Dict[str, Any]],
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
@@ -347,7 +346,7 @@ class FileOperations:
         source_pdf_path: Any,
         page_num: int = 1,
         target_caratula_name: Optional[str] = None,
-        db_manager: Optional[DatabaseManager] = None,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
@@ -424,13 +423,15 @@ class FileOperations:
         cls,
         folder_path: Any,
         clean_base_code: str,
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
+        ejecucion_id: Optional[int] = None,
+        carpeta_uuid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Renombra los PDFs internos con 'clean_base_code' (hasta el año, SIN _2/_3) y
         renombra la carpeta con 'clean_base_code' (agregando _2, _3 si hay colisión de directorios).
-        Registra cada movimiento en la tabla 'movimientos_archivos' de SQLite.
+        Registra el movimiento de carpeta y archivos en MySQL para trazabilidad y Rollback por lotes.
         """
         folder = Path(folder_path).resolve()
         if not folder.exists() or not folder.is_dir():
@@ -497,46 +498,63 @@ class FileOperations:
         if target_folder_path != folder:
             os.replace(str(folder), str(target_folder_path))
 
-        # 4. Registrar cada archivo en SQLite con su ruta anterior y su ruta nueva final
+        # 4. Registrar cada archivo y la carpeta en MySQL / DB opcional
         logged_files = 0
+        mysql_file_logs: List[Dict[str, Any]] = []
+        uuid_val = carpeta_uuid
+        if mysql_manager and getattr(mysql_manager, "enabled", False) and not uuid_val:
+            uuid_val = mysql_manager.obtener_uuid_por_ruta_o_nombre(str(folder), old_folder_name)
+
         for item in file_tracking:
             final_pdf_path = (target_folder_path / item["new_name"]).resolve()
             if final_pdf_path == item["old_abs_path"] and item["new_name"] == item["old_name"]:
                 continue
 
-            file_hash = cls.compute_sha256(final_pdf_path)
             pages_cnt = cls.get_pdf_page_count(final_pdf_path)
 
             is_dup = bool(re.search(r"[_+-]DUP\d*(\.pdf)?$", item["new_name"], re.IGNORECASE))
             tipo_mov = "RENOMBRADO_DUP" if is_dup else "RENOMBRADO"
-            estado_op = "REVISION_MANUAL_DUP" if is_dup else "EXITOSO"
-            detalles_str = json.dumps({"es_duplicado": True, "marcado_revision_manual": True}) if is_dup else None
 
-            db_manager.log_file_movement(
-                tipo_movimiento=tipo_mov,
-                ruta_anterior=item["old_abs_path"],
-                ruta_nueva=final_pdf_path,
-                nombre_anterior=item["old_name"],
-                nombre_nuevo=item["new_name"],
-                hash_actual=file_hash,
-                numero_paginas=pages_cnt,
-                hash_origen_inicial=file_hash,
-            )
-            if mysql_manager and getattr(mysql_manager, "enabled", False):
-                mysql_manager.registrar_trazabilidad_archivo(
-                    tipo_operacion=tipo_mov,
-                    archivo_nombre_origen=item["old_name"],
-                    archivo_nombre_destino=item["new_name"],
-                    carpeta_origen=str(folder),
-                    carpeta_destino=str(target_folder_path),
-                    ruta_completa_origen=str(item["old_abs_path"]),
-                    ruta_completa_destino=str(final_pdf_path),
-                    hash_sha256=file_hash,
+            if db_manager is not None:
+                file_hash = cls.compute_sha256(final_pdf_path)
+                db_manager.log_file_movement(
+                    tipo_movimiento=tipo_mov,
+                    ruta_anterior=item["old_abs_path"],
+                    ruta_nueva=final_pdf_path,
+                    nombre_anterior=item["old_name"],
+                    nombre_nuevo=item["new_name"],
+                    hash_actual=file_hash,
                     numero_paginas=pages_cnt,
-                    estado_operacion=estado_op,
-                    detalles_json=detalles_str,
+                    hash_origen_inicial=file_hash,
                 )
+
+            if mysql_manager and getattr(mysql_manager, "enabled", False) and ejecucion_id is not None and uuid_val:
+                mysql_file_logs.append({
+                    "ejecucion_id": ejecucion_id,
+                    "carpeta_uuid": uuid_val,
+                    "tipo_accion": tipo_mov,
+                    "nombre_anterior": item["old_name"],
+                    "nombre_nuevo": item["new_name"],
+                    "ruta_anterior": str(item["old_abs_path"]),
+                    "ruta_nueva": str(final_pdf_path),
+                    "cantidad_paginas": pages_cnt,
+                })
             logged_files += 1
+
+        if mysql_manager and getattr(mysql_manager, "enabled", False) and ejecucion_id is not None and uuid_val:
+            if target_folder_path != folder or mysql_file_logs:
+                mysql_manager.registrar_movimiento_carpeta(
+                    ejecucion_id=ejecucion_id,
+                    carpeta_uuid=uuid_val,
+                    tipo_accion="RENOMBRADO_CARPETA",
+                    nombre_anterior=old_folder_name,
+                    nombre_nuevo=target_folder_path.name,
+                    ruta_anterior=str(folder),
+                    ruta_nueva=str(target_folder_path),
+                    cantidad_archivos=len(file_tracking),
+                )
+            if mysql_file_logs:
+                mysql_manager.registrar_movimientos_archivos_lote(mysql_file_logs)
 
         collision_applied = target_folder_path.name != clean_base_code
         return {
@@ -589,16 +607,18 @@ class FileOperations:
         cls,
         folder_path: Any,
         apartados_dir: Any,
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         tipo_movimiento: str = "APARTADO_CARATULA_BLANCA",
         error_subfolder: Optional[str] = "CARATULA EN BLANCO",
         mysql_manager: Optional[Any] = None,
+        ejecucion_id: Optional[int] = None,
+        carpeta_uuid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Mueve una carpeta completa al directorio destino especificado.
-        Si se especifica 'error_subfolder' (ej. 'CARATULA EN BLANCO', 'PDFS SIN CARATULA'),
+        Si se especifica 'error_subfolder' (ej. 'CARATULA EN BLANCO', 'ESTRUCTURA DISCREPANTE'),
         la carpeta se coloca dentro de esa subcarpeta descriptiva del error.
-        Limpia el nombre hasta el año, adapta colisiones (_2, _3) y registra en SQLite para Rollback.
+        Limpia el nombre hasta el año, adapta colisiones (_2, _3) y registra en MySQL para Rollback por lotes.
         """
         folder = Path(folder_path).resolve()
         base_dest = Path(apartados_dir).resolve()
@@ -634,6 +654,11 @@ class FileOperations:
         shutil.move(str(folder), str(target_folder_path))
 
         moved_count = 0
+        mysql_file_logs: List[Dict[str, Any]] = []
+        uuid_val = carpeta_uuid
+        if mysql_manager and getattr(mysql_manager, "enabled", False) and not uuid_val:
+            uuid_val = mysql_manager.obtener_uuid_por_ruta_o_nombre(str(folder), folder.name)
+
         for item in pre_move_info:
             moved_file_path = (target_folder_path / item["old_name"]).resolve()
             if not moved_file_path.exists():
@@ -642,31 +667,45 @@ class FileOperations:
             if final_file_path != moved_file_path:
                 os.replace(str(moved_file_path), str(final_file_path))
 
-            f_hash = cls.compute_sha256(final_file_path)
             n_pages = cls.get_pdf_page_count(final_file_path) if final_file_path.suffix.lower() == ".pdf" else 0
-            db_manager.log_file_movement(
-                tipo_movimiento=tipo_movimiento,
-                ruta_anterior=item["old_path"],
-                ruta_nueva=final_file_path,
-                nombre_anterior=item["old_name"],
-                nombre_nuevo=item["new_name"],
-                hash_actual=f_hash,
-                numero_paginas=n_pages,
-                hash_origen_inicial=f_hash,
-            )
-            if mysql_manager and getattr(mysql_manager, "enabled", False):
-                mysql_manager.registrar_trazabilidad_archivo(
-                    tipo_operacion=tipo_movimiento,
-                    archivo_nombre_origen=item["old_name"],
-                    archivo_nombre_destino=item["new_name"],
-                    carpeta_origen=str(folder),
-                    carpeta_destino=str(target_folder_path),
-                    ruta_completa_origen=str(item["old_path"]),
-                    ruta_completa_destino=str(final_file_path),
-                    hash_sha256=f_hash,
+            if db_manager is not None:
+                f_hash = cls.compute_sha256(final_file_path)
+                db_manager.log_file_movement(
+                    tipo_movimiento=tipo_movimiento,
+                    ruta_anterior=item["old_path"],
+                    ruta_nueva=final_file_path,
+                    nombre_anterior=item["old_name"],
+                    nombre_nuevo=item["new_name"],
+                    hash_actual=f_hash,
                     numero_paginas=n_pages,
+                    hash_origen_inicial=f_hash,
                 )
+            if mysql_manager and getattr(mysql_manager, "enabled", False) and ejecucion_id is not None and uuid_val:
+                mysql_file_logs.append({
+                    "ejecucion_id": ejecucion_id,
+                    "carpeta_uuid": uuid_val,
+                    "tipo_accion": tipo_movimiento,
+                    "nombre_anterior": item["old_name"],
+                    "nombre_nuevo": item["new_name"],
+                    "ruta_anterior": str(item["old_path"]),
+                    "ruta_nueva": str(final_file_path),
+                    "cantidad_paginas": n_pages,
+                })
             moved_count += 1
+
+        if mysql_manager and getattr(mysql_manager, "enabled", False) and ejecucion_id is not None and uuid_val:
+            mysql_manager.registrar_movimiento_carpeta(
+                ejecucion_id=ejecucion_id,
+                carpeta_uuid=uuid_val,
+                tipo_accion=tipo_movimiento,
+                nombre_anterior=folder.name,
+                nombre_nuevo=target_folder_path.name,
+                ruta_anterior=str(folder),
+                ruta_nueva=str(target_folder_path),
+                cantidad_archivos=moved_count,
+            )
+            if mysql_file_logs:
+                mysql_manager.registrar_movimientos_archivos_lote(mysql_file_logs)
 
         return {
             "old_folder_path": str(folder),
@@ -680,12 +719,15 @@ class FileOperations:
         cls,
         folder_path: Any,
         validados_dir: Any,
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
+        mysql_manager: Optional[Any] = None,
+        ejecucion_id: Optional[int] = None,
+        carpeta_uuid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Mueve una carpeta que ya está totalmente bien (COINCIDE_TOTAL) al directorio
         de carpetas correctas/validadas especificado por el usuario (sin subcarpeta de error),
-        registrando el movimiento en SQLite.
+        registrando el movimiento en MySQL.
         """
         return cls.move_folder_to_apartados(
             folder_path=folder_path,
@@ -693,13 +735,16 @@ class FileOperations:
             db_manager=db_manager,
             tipo_movimiento="MOVIDO_A_CORRECTOS",
             error_subfolder=None,
+            mysql_manager=mysql_manager,
+            ejecucion_id=ejecucion_id,
+            carpeta_uuid=carpeta_uuid,
         )
 
     @classmethod
     def rollback_single_candidate(
         cls,
         candidate: Dict[str, Any],
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
     ) -> Tuple[bool, str]:
         """
@@ -803,7 +848,7 @@ class FileOperations:
     def rollback_folder_to_initial_state(
         cls,
         initial_folder_path: Any,
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
@@ -835,7 +880,7 @@ class FileOperations:
     @classmethod
     def rollback_all_to_initial_state(
         cls,
-        db_manager: DatabaseManager,
+        db_manager: Optional[Any] = None,
         mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 import time
@@ -11,7 +12,6 @@ from src.core.cache_manager import CacheManager
 from src.core.claude_engine import ClaudeVisionEngine
 from src.core.caratula_inspector import CaratulaInspector
 from src.core.file_operations import FileOperations
-from src.database.db_manager import DatabaseManager
 from src.parsers.folder_parser import FolderParser
 from src.matcher.comparator import FolderComparator
 from src.database.mysql_manager import MySQLManager
@@ -19,17 +19,14 @@ from src.database.mysql_manager import MySQLManager
 
 class FolderOCRService:
     """
-    Servicio integral de Diagnóstico General (Fase 1), Ejecución Física (Fase 2),
-    Auditoría en SQLite ('auditoria_libros.db'), Trazabilidad MySQL y Rollback Total:
-    - Filtro de raíz: Solo revisa carpetas con '_' en el primer nivel de la raíz seleccionada
-      (ignorando subcarpetas anidadas y carpetas sin '_' como BUENOS y MALOS).
-    - Ahorro máximo de tokens en Claude Sonnet 5:
-      1. Inspección local de la CARÁTULA y todos los PDFs de la carpeta (0 tokens).
-      2. Si la carátula está totalmente en blanco -> APARTAR_CARATULA_BLANCA (0 tokens).
-      3. Si hay PDFs que no tienen ninguna página de la carátula -> DISCREPANCIA_SIN_CARATULA (0 tokens).
-      4. Si todos los PDFs tienen la carátula (ya sea la página con info o la página en blanco
-         reemplazable), envía a Claude ÚNICAMENTE la página con información de la CARÁTULA (1 sola imagen
-         por carpeta + Caché Local SHA-256 + Prompt Caching de Anthropic).
+    Servicio integral de Trazabilidad MySQL, Chequeo de Estructura, Diagnóstico con IA y
+    Traslados por Lotes (Invariante 950 carpetas = 950 carpetas):
+    - Paso 1: Indexación inicial en MySQL (carpetas_iniciales + archivos_iniciales) y
+      renombrado por 1er PDF hasta el año.
+    - Paso 2: Chequeo estricto de estructura de 7 posiciones (pre-IA), validación rápida
+      de carpetas homogéneas sin carátula, y análisis con Claude Vision (2 páginas) para
+      carpetas con carátula independiente.
+    - Paso 3: Traslado por lotes a Correctos o Apartados y Rollback estricto por lote.
     """
 
     def __init__(self, db_path: Optional[Path] = None):
@@ -39,7 +36,6 @@ class FolderOCRService:
         )
         self.cache = CacheManager()
         self.settings = SettingsManager.load()
-        self.db = DatabaseManager(db_path=db_path)
         self.mysql = MySQLManager(self.settings)
 
     def reload_settings(self) -> Dict[str, Any]:
@@ -50,7 +46,7 @@ class FolderOCRService:
             user=str(self.settings.get("mysql_user", "root")),
             password=str(self.settings.get("mysql_password", "")),
             database=str(self.settings.get("mysql_database", "trazabilidad_selloslibros")),
-            enabled=bool(self.settings.get("mysql_enabled", False))
+            enabled=bool(self.settings.get("mysql_enabled", True))
         )
         return self.settings
 
@@ -158,6 +154,84 @@ class FolderOCRService:
             "folder_results": results,
         }
 
+    @staticmethod
+    def check_folder_structure(folder_path: Path) -> Dict[str, Any]:
+        """
+        Paso 2A (Chequeo estricto de estructura de 7 posiciones, 0 tokens):
+        Compara el código de 7 posiciones (delegacion, seccion, libro, tomo, volumen,
+        fraccionamiento, anio) de la carpeta contra TODOS los PDFs internos.
+        Si algún PDF es irregular (ej. REG) o difiere en cualquiera de las 7 posiciones,
+        la carpeta se marca como 'ESTRUCTURA_DISCREPANTE' para envío directo a Apartados.
+        También detecta si existe archivo independiente de CARÁTULA.
+        """
+        folder_p = Path(folder_path)
+        folder_data = FolderParser.parse(folder_p.name)
+        f_keys = ("delegacion", "seccion_raw", "libro_raw", "tomo_raw", "volumen_raw", "fraccionamiento_raw", "anio_raw")
+        folder_tuple = tuple(str(folder_data.get(k) or "").zfill(4 if k == "anio_raw" else 2) for k in f_keys)
+
+        pdfs = sorted(
+            [f for f in folder_p.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+            key=lambda x: x.name,
+        )
+
+        caratula_files: List[str] = []
+        regular_pdfs: List[str] = []
+        mismatched_pdfs: List[str] = []
+        irregular_pdfs: List[str] = []
+        dup_pdfs: List[str] = []
+
+        for pdf in pdfs:
+            name = pdf.name
+            if CaratulaInspector.is_irregular_reg_pdf_name(name):
+                irregular_pdfs.append(name)
+                continue
+
+            if CaratulaInspector.is_duplicate_pdf_name(name):
+                dup_pdfs.append(name)
+
+            is_car = "CARATULA" in name.upper()
+            if is_car:
+                caratula_files.append(name)
+            else:
+                regular_pdfs.append(name)
+
+            # Validar patrón de 7 posiciones en todo PDF regular (y en carátula si tiene prefijo numérico)
+            p_data = FolderParser.parse(name)
+            p_valid = bool(p_data.get("anio_raw"))
+            if not is_car:
+                if not p_valid:
+                    mismatched_pdfs.append(f"{name} (patrón inválido)")
+                else:
+                    p_tuple = tuple(str(p_data.get(k) or "").zfill(4 if k == "anio_raw" else 2) for k in f_keys)
+                    if p_tuple != folder_tuple:
+                        mismatched_pdfs.append(f"{name} ({'_'.join(p_tuple)} != {'_'.join(folder_tuple)})")
+            else:
+                if p_valid:
+                    p_tuple = tuple(str(p_data.get(k) or "").zfill(4 if k == "anio_raw" else 2) for k in f_keys)
+                    if p_tuple != folder_tuple:
+                        mismatched_pdfs.append(f"{name} ({'_'.join(p_tuple)} != {'_'.join(folder_tuple)})")
+
+        is_homogeneous = (len(mismatched_pdfs) == 0 and len(irregular_pdfs) == 0 and len(pdfs) > 0)
+        reasons = []
+        if len(pdfs) == 0:
+            reasons.append("Carpeta sin archivos PDF.")
+        if irregular_pdfs:
+            reasons.append(f"Archivos irregulares REG: {', '.join(irregular_pdfs[:5])}")
+        if mismatched_pdfs:
+            reasons.append(f"PDFs con diferente patrón de 7 posiciones: {', '.join(mismatched_pdfs[:5])}")
+
+        return {
+            "is_homogeneous": is_homogeneous,
+            "has_caratula_file": len(caratula_files) > 0,
+            "caratula_files": caratula_files,
+            "regular_pdfs": regular_pdfs,
+            "mismatched_pdfs": mismatched_pdfs,
+            "irregular_pdfs": irregular_pdfs,
+            "dup_pdfs": dup_pdfs,
+            "total_pdfs": len(pdfs),
+            "reason": " | ".join(reasons) if reasons else "Estructura homogénea (7 posiciones coinciden).",
+        }
+
     def process_folder(
         self,
         folder_path: str,
@@ -166,23 +240,110 @@ class FolderOCRService:
         force_claude_on_missing_caratula: bool = False,
     ) -> Dict[str, Any]:
         """
-        FASE 1 (Diagnóstico General 100% Lectura de una carpeta):
-        1. Inspecciona localmente el PDF de la Carátula (páginas con texto vs en blanco) y
-           comprueba si todos los PDFs de la carpeta tienen adjunta una página de la Carátula.
-        2. Si la Carátula está totalmente en blanco -> 'APARTAR_CARATULA_BLANCA' (0 tokens).
-        3. Si hay PDFs que no tienen ninguna página de la Carátula -> 'DISCREPANCIA_SIN_CARATULA' (0 tokens).
-        4. Si todos los PDFs tienen la Carátula (con info o con hoja en blanco reemplazable por otra
-           hoja de la Carátula que sí tiene info), consulta en Claude ÚNICAMENTE la página con info
-           de la Carátula.
-        5. Calcula el código base limpio hasta el año conservando intacta la posición 1 (Delegación)
-           y guarda el diagnóstico en la tabla 'detecciones' de SQLite.
+        PASO 2 (Chequeo de Estructura + Diagnóstico General):
+        - Paso 2A: Chequeo estricto de 7 posiciones (pre-IA). Si algún PDF difiere o es REG -> ESTRUCTURA_DISCREPANTE (Apartar, 0 tokens).
+        - Paso 2B: Si todos los PDFs siguen el patrón y NO hay archivo de carátula independiente -> Carátula embebida correcta -> COINCIDE_TOTAL (0 tokens).
+        - Paso 2C: Si todos los PDFs siguen el patrón y SÍ hay archivo de carátula independiente -> Analizar 2 páginas con Claude Vision y validar coincidencia + presencia en PDFs.
         """
         self.reload_settings()
         start_time = time.perf_counter()
         folder_p = Path(folder_path)
         folder_data = FolderParser.parse(folder_p.name)
+        clean_current_code = FileOperations.strip_suffix_after_year(folder_p.name, folder_data)
 
-        # 1. Inspección local de Carátula y hojas adjuntas en todos los PDFs (0 tokens)
+        # Paso 2A: Chequeo estricto de estructura de 7 posiciones (0 tokens)
+        struct = self.check_folder_structure(folder_p)
+        if not struct["is_homogeneous"]:
+            sub_rev = "ARCHIVOS IRREGULARES REG" if (struct["irregular_pdfs"] and not struct["mismatched_pdfs"]) else "ESTRUCTURA DISCREPANTE"
+            ev_lines = [f"⛔ [0 TOKENS - ESTRUCTURA] {struct['reason']}"]
+            return {
+                "folder_path": str(folder_p),
+                "folder_data": folder_data,
+                "caratula_inspection": {
+                    "status": "ESTRUCTURA_DISCREPANTE",
+                    "total_regular_pdfs": len(struct["regular_pdfs"]),
+                    "irregular_pdfs": struct["irregular_pdfs"],
+                    "dup_pdfs": struct["dup_pdfs"],
+                    "summary_message": struct["reason"],
+                },
+                "target_pdfs_analyzed": {},
+                "processed_pages_count": 0,
+                "total_elapsed_seconds": round(time.perf_counter() - start_time, 2),
+                "documents_detail": {},
+                "ocr_consolidado": {
+                    "seccion": folder_data.get("seccion_raw") or "00",
+                    "libro": folder_data.get("libro_raw") or "00",
+                    "tomo": folder_data.get("tomo_raw") or "00",
+                    "volumen": folder_data.get("volumen_raw") or "00",
+                    "fraccionamiento": folder_data.get("fraccionamiento_raw") or "00",
+                    "anio": folder_data.get("anio_raw") or "0000",
+                    "es_auxiliar": False,
+                    "evidencias_globales": ev_lines,
+                },
+                "comparacion": {
+                    "veredicto": "ESTRUCTURA_DISCREPANTE",
+                    "discrepancias": ev_lines,
+                    "coincidencias": [],
+                    "propuestas_ceros": [],
+                    "detalles_campos": {},
+                },
+                "veredicto_global": "ESTRUCTURA_DISCREPANTE",
+                "subcarpeta_revision": sub_rev,
+                "codigo_base_sugerido": clean_current_code,
+                "needs_page_replacement": False,
+                "needs_rename": False,
+                "needs_apartar": True,
+                "has_discrepancy": True,
+                "cache_summary": self.cache.get_summary(),
+            }
+
+        # Paso 2B: Carpeta homogénea SIN archivo de carátula independiente (carátula embebida) -> CORRECTA (0 tokens)
+        if not struct["has_caratula_file"] and not custom_caratula_path:
+            ev_lines = [
+                f"✅ [0 TOKENS - SIN ARCHIVO CARÁTULA] Todos los {len(struct['regular_pdfs'])} PDFs siguen el patrón exacto de la carpeta (carátula embebida). Lista para Correctos."
+            ]
+            return {
+                "folder_path": str(folder_p),
+                "folder_data": folder_data,
+                "caratula_inspection": {
+                    "status": "CARATULA_EMBEBIDA_OK",
+                    "total_regular_pdfs": len(struct["regular_pdfs"]),
+                    "irregular_pdfs": [],
+                    "dup_pdfs": struct["dup_pdfs"],
+                    "summary_message": ev_lines[0],
+                },
+                "target_pdfs_analyzed": {},
+                "processed_pages_count": 0,
+                "total_elapsed_seconds": round(time.perf_counter() - start_time, 2),
+                "documents_detail": {},
+                "ocr_consolidado": {
+                    "seccion": folder_data.get("seccion_raw") or "00",
+                    "libro": folder_data.get("libro_raw") or "00",
+                    "tomo": folder_data.get("tomo_raw") or "00",
+                    "volumen": folder_data.get("volumen_raw") or "00",
+                    "fraccionamiento": folder_data.get("fraccionamiento_raw") or "00",
+                    "anio": folder_data.get("anio_raw") or "0000",
+                    "es_auxiliar": False,
+                    "evidencias_globales": ev_lines,
+                },
+                "comparacion": {
+                    "veredicto": "COINCIDE_TOTAL",
+                    "discrepancias": [],
+                    "coincidencias": ev_lines,
+                    "propuestas_ceros": [],
+                    "detalles_campos": {},
+                },
+                "veredicto_global": "COINCIDE_TOTAL",
+                "subcarpeta_revision": "",
+                "codigo_base_sugerido": clean_current_code,
+                "needs_page_replacement": False,
+                "needs_rename": False,
+                "needs_apartar": False,
+                "has_discrepancy": False,
+                "cache_summary": self.cache.get_summary(),
+            }
+
+        # Paso 2C: Carpeta homogénea CON archivo de carátula independiente -> Inspección y análisis con Claude Vision (2 páginas)
         insp = CaratulaInspector.inspect_folder(folder_p, custom_caratula_path=custom_caratula_path)
         c_status = insp["status"]
         caratula_path_str = insp.get("caratula_path")
@@ -564,47 +725,35 @@ class FolderOCRService:
                 anio=ocr_final.get("anio"),
             )
 
-            needs_page_replacement = (c_status == "REEMPLAZABLE_HOJA_BLANCA")
+            # No se modifican páginas binarias de PDFs; verificación 100% de solo lectura
+            needs_page_replacement = False
             comp_veredicto = comparison.get("veredicto", "INDETERMINADO")
-            needs_rename = (comp_veredicto != "COINCIDE_TOTAL") or (folder_p.name != codigo_sugerido)
+            needs_rename = False
             needs_apartar = False
+            embedded_to_create = None
 
-            if is_embedded_candidate:
-                insp["status"] = "CARATULA_EMBEBIDA_VALIDA"
-                ocr_final["evidencias_globales"].append(
-                    f"✔ [CARÁTULA EMBEBIDA VÁLIDA] Se detectó y validó el Acta de Apertura compartida en la Página 1 de los archivos. "
-                    f"Se adopta como carátula oficial del libro y se clasifica para pasar a Correctos."
-                )
-                embedded_to_create = {
-                    "source_pdf": str(caratula_pdf_path),
-                    "page_num": 1,
-                    "target_name": f"{codigo_sugerido}_CARATULA_00.pdf",
-                }
-                if not needs_rename:
-                    veredicto_global = "COINCIDE_TOTAL"
-                elif comp_veredicto == "RELLENO_DE_CEROS_PROPUESTO":
-                    veredicto_global = "RELLENO_DE_CEROS_PROPUESTO"
-                else:
-                    veredicto_global = "RENOMBRAR_CARPETA"
-            elif comp_veredicto == "SIN_DATOS_CARATULA":
-                needs_apartar = True
-                veredicto_global = "SIN_INFO_LIMPIAR_NOMBRE" if needs_rename else "SIN_INFO_MANTENER_NOMBRE"
-                subcarpeta_revision = "CARATULA SIN DATOS"
-            elif needs_page_replacement and comp_veredicto == "COINCIDE_TOTAL" and not needs_rename:
-                veredicto_global = "REEMPLAZAR_HOJA_BLANCA"
-            elif needs_page_replacement and needs_rename:
-                veredicto_global = "REEMPLAZAR_HOJA_Y_RENOMBRAR"
-            elif comp_veredicto == "COINCIDE_TOTAL" and needs_rename:
-                # Coinciden los números pero la carpeta tenía un sufijo como _REVISAR_SEPARADO
-                veredicto_global = "LIMPIAR_SUFIJO_CARPETA"
-            else:
-                veredicto_global = comp_veredicto
-
-            subcarpeta_revision = FileOperations.determine_review_subfolder(
-                caratula_status=c_status,
-                veredicto_global=veredicto_global,
-                found_any_ocr_info=True,
+            has_missing_or_blank_internal = (
+                c_status == "REEMPLAZABLE_HOJA_BLANCA"
+                or len(insp.get("pdfs_missing_caratula", [])) > 0
+                or len(insp.get("replaceable_pdfs", [])) > 0
             )
+
+            if comp_veredicto == "SIN_DATOS_CARATULA":
+                needs_apartar = True
+                veredicto_global = "CARATULA_SIN_DATOS"
+                subcarpeta_revision = "CARATULA SIN DATOS"
+            elif has_missing_or_blank_internal:
+                needs_apartar = True
+                veredicto_global = "DISCREPANCIA_CARATULA_INTERNA"
+                subcarpeta_revision = "PDFS CON CARATULA BLANCA O FALTANTE"
+            elif comp_veredicto != "COINCIDE_TOTAL":
+                needs_apartar = True
+                needs_rename = True
+                veredicto_global = comp_veredicto
+                subcarpeta_revision = "DISCREPANCIA CARATULA VS CARPETA"
+            else:
+                veredicto_global = "COINCIDE_TOTAL"
+                subcarpeta_revision = ""
 
         # REGLA ESTRICTA DE DUP Y REG: Si la carpeta contiene archivos con _DUP o archivos REG/irregulares,
         # se clasifica directamente para Apartado / Revisión y NUNCA se da por COINCIDE_TOTAL.
@@ -658,29 +807,8 @@ class FolderOCRService:
         return result
 
     def _save_diagnosis_result(self, result: Dict[str, Any]) -> None:
-        """Guarda el diagnóstico en SQLite local y, si está activo, en MySQL."""
-        self.db.save_detection(result)
-        if self.mysql and getattr(self.mysql, "enabled", False):
-            try:
-                insp = result.get("caratula_inspection", {})
-                f_data = result.get("folder_data", {})
-                ocr = result.get("ocr_consolidado", {})
-                self.mysql.registrar_diagnostico_carpeta(
-                    ruta_carpeta=result.get("folder_path", ""),
-                    nombre_carpeta=f_data.get("folder_name", Path(result.get("folder_path", "")).name),
-                    pdf_caratula=insp.get("caratula_filename"),
-                    estado_caratula=insp.get("status", "DESCONOCIDO"),
-                    total_pdfs=int(insp.get("total_regular_pdfs", 0)),
-                    codigo_esperado=f_data.get("codigo_normalizado", ""),
-                    codigo_detectado=result.get("codigo_base_sugerido", ""),
-                    codigo_sugerido=result.get("codigo_base_sugerido", ""),
-                    veredicto=result.get("veredicto_global", "INDETERMINADO"),
-                    subcarpeta_revision=result.get("subcarpeta_revision", ""),
-                    evidencias_json=json.dumps(ocr.get("evidencias_globales", []), ensure_ascii=False) if isinstance(ocr, dict) else None,
-                    total_imagenes=int(insp.get("total_pages_in_folder", 0)),
-                )
-            except Exception as e:
-                print(f"[Service Warning] No se pudo guardar diagnóstico en MySQL: {e}")
+        """Método mantenido por compatibilidad; los diagnósticos ya no usan SQLite."""
+        return None
 
     # =========================================================================
     # FASE 2: OPERACIONES FÍSICAS Y ROLLBACK TOTAL
@@ -709,7 +837,7 @@ class FolderOCRService:
             caratula_path=caratula_path,
             info_page_num=int(info_page_num),
             replaceable_pdfs=replaceable_pdfs,
-            db_manager=self.db,
+            db_manager=None,
             mysql_manager=self.mysql,
         )
 
@@ -763,12 +891,18 @@ class FolderOCRService:
             code = "_".join(parts)
 
         old_name = Path(str(folder_path)).name
+        ejec_id = None
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            ejec_id = self.mysql.crear_ejecucion_lote("RENOMBRADO_INDIVIDUAL", {"folder": old_name, "target": code})
         res = FileOperations.rename_folder_and_internal_pdfs(
             folder_path=folder_path,
             clean_base_code=code,
-            db_manager=self.db,
+            db_manager=None,
             mysql_manager=self.mysql,
+            ejecucion_id=ejec_id,
         )
+        if ejec_id is not None:
+            self.mysql.finalizar_ejecucion_lote(ejec_id, 1, res.get("files_renamed_count", 0))
         # Actualizar la ruta, el parser, la carátula y la comparativa en tiempo real
         new_folder_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_folder_p)
@@ -802,7 +936,7 @@ class FolderOCRService:
                     source_pdf_path=src_pdf,
                     page_num=emb_to_create.get("page_num", 1),
                     target_caratula_name=target_c_name,
-                    db_manager=self.db,
+                    db_manager=None,
                     mysql_manager=self.mysql,
                 )
                 if c_res.get("created"):
@@ -832,18 +966,6 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"✏️ Renombrada ({res['new_folder_name']})"
         diag_result["files_modified_count"] = res["files_renamed_count"]
-
-        if self.mysql and self.mysql.enabled:
-            self.mysql.registrar_movimiento_carpeta(
-                tipo_movimiento="RENOMBRADO_AUDITORIA",
-                nombre_origen=old_name,
-                nombre_destino=res["new_folder_name"],
-                ruta_origen=str(folder_path),
-                ruta_destino=res["new_folder_path"],
-                primer_pdf_referencia=res.get("new_folder_name"),
-                motivo=f"Renombrado por auditoría ({res['files_renamed_count']} PDFs)",
-                indice_colision=res.get("collision_index", 0)
-            )
 
         return res
 
@@ -889,7 +1011,7 @@ class FolderOCRService:
             source_pdf_path=src_pdf,
             page_num=emb_to_create.get("page_num", 1),
             target_caratula_name=target_c_name,
-            db_manager=self.db,
+            db_manager=None,
             mysql_manager=self.mysql,
         )
         if c_res.get("created"):
@@ -1070,11 +1192,9 @@ class FolderOCRService:
                 diag_result["needs_apartar"] = False
                 applied_changes.append("Veredicto actualizado a COINCIDE_TOTAL")
 
-        if self.db:
-            try:
-                self.db.guardar_deteccion(diag_result)
-            except Exception:
-                pass
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            # Ya no se usa SQLite
+            pass
 
         return {
             "success": True,
@@ -1087,16 +1207,12 @@ class FolderOCRService:
         diag_result: Dict[str, Any],
         apartados_dir: str,
         custom_error_subfolder: Optional[str] = None,
+        ejecucion_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Envía una carpeta que requiere revisión al directorio de Apartados seleccionado,
-        dentro de una subcarpeta con descripción rápida del error (ej. 'CARATULA EN BLANCO',
-        'PDFS SIN CARATULA', 'CARATULA SIN DATOS', 'SIN ARCHIVO CARATULA', etc.).
+        dentro de una subcarpeta con descripción rápida del error, registrando en MySQL.
         """
-        # Si la carpeta tiene correcciones físicas pendientes (hojas o renombre), aplicarlas antes de archivarla
-        if diag_result.get("needs_page_replacement") or diag_result.get("needs_rename"):
-            self.execute_all_pending_corrections(diag_result)
-
         folder_path = diag_result.get("folder_path", "")
         if not diag_result.get("initial_folder_path"):
             diag_result["initial_folder_path"] = str(folder_path)
@@ -1111,14 +1227,26 @@ class FolderOCRService:
                 veredicto_global=diag_result.get("veredicto_global", ""),
             )
         )
+        own_batch = False
+        if ejecucion_id is None and self.mysql and getattr(self.mysql, "enabled", False):
+            ejecucion_id = self.mysql.crear_ejecucion_lote(
+                "MOVER_APARTADO_INDIVIDUAL",
+                {"folder": Path(str(folder_path)).name, "subcarpeta": error_sub},
+            )
+            own_batch = True
+
         res = FileOperations.move_folder_to_apartados(
             folder_path=folder_path,
             apartados_dir=apartados_dir,
-            db_manager=self.db,
+            db_manager=None,
             tipo_movimiento=f"APARTADO: {error_sub}",
             error_subfolder=error_sub,
             mysql_manager=self.mysql,
+            ejecucion_id=ejecucion_id,
         )
+        if own_batch and ejecucion_id is not None:
+            self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+
         new_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_p)
         diag_result["folder_data"] = FolderParser.parse(new_p.name)
@@ -1134,66 +1262,41 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"📦 Apartada ({error_sub})"
         diag_result["files_modified_count"] = res["files_moved_count"]
-
-        if self.mysql and self.mysql.enabled:
-            self.mysql.registrar_movimiento_carpeta(
-                tipo_movimiento="APARTADO_REVISION",
-                nombre_origen=Path(str(folder_path)).name,
-                nombre_destino=new_p.name,
-                ruta_origen=str(folder_path),
-                ruta_destino=str(new_p),
-                motivo=f"Apartado por {error_sub}",
-                indice_colision=res.get("collision_index", 0)
-            )
-
         return res
 
-    def execute_move_to_validados(self, diag_result: Dict[str, Any], validados_dir: str) -> Dict[str, Any]:
+    def execute_move_to_validados(
+        self,
+        diag_result: Dict[str, Any],
+        validados_dir: str,
+        ejecucion_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Mueve una carpeta que está totalmente bien (COINCIDE_TOTAL) al directorio de carpetas
-        correctas/validadas especificado por el usuario y lo registra en SQLite con Rollback.
+        correctas/validadas especificado por el usuario y lo registra en MySQL con Rollback por lotes.
         """
         folder_path = diag_result.get("folder_path", "")
         if not diag_result.get("initial_folder_path"):
             diag_result["initial_folder_path"] = str(folder_path)
             diag_result["initial_folder_name"] = Path(str(folder_path)).name
 
-        # Si tenía carátula embebida pendiente de creación física y no fue renombrada previamente:
-        emb_to_create = diag_result.get("embedded_caratula_to_create")
-        if emb_to_create:
-            folder_p = Path(folder_path)
-            target_c_name = emb_to_create.get("target_name") or f"{folder_p.name}_CARATULA_00.pdf"
-            src_pdf = Path(emb_to_create["source_pdf"])
-            if not src_pdf.exists():
-                src_pdf = folder_p / src_pdf.name
-            if not src_pdf.exists():
-                candidates = [f for f in folder_p.glob("*.pdf") if "CARATULA" not in f.name]
-                if candidates:
-                    src_pdf = candidates[0]
-            if src_pdf.exists():
-                c_file = folder_p / target_c_name
-                if not c_file.exists():
-                    c_res = FileOperations.create_caratula_from_pdf_page(
-                        folder_path=folder_p,
-                        source_pdf_path=src_pdf,
-                        page_num=emb_to_create.get("page_num", 1),
-                        target_caratula_name=target_c_name,
-                        db_manager=self.db,
-                        mysql_manager=self.mysql,
-                    )
-                    if c_res.get("created"):
-                        insp = diag_result.get("caratula_inspection", {})
-                        insp["caratula_filename"] = target_c_name
-                        insp["caratula_path"] = str(folder_p / target_c_name)
-                        actions = list(diag_result.get("applied_actions", []))
-                        actions.append(f"📄 Carátula física extraída y creada: {target_c_name}")
-                        diag_result["applied_actions"] = actions
+        own_batch = False
+        if ejecucion_id is None and self.mysql and getattr(self.mysql, "enabled", False):
+            ejecucion_id = self.mysql.crear_ejecucion_lote(
+                "MOVER_CORRECTO_INDIVIDUAL",
+                {"folder": Path(str(folder_path)).name},
+            )
+            own_batch = True
 
         res = FileOperations.move_folder_to_validados(
             folder_path=folder_path,
             validados_dir=validados_dir,
-            db_manager=self.db,
+            db_manager=None,
+            mysql_manager=self.mysql,
+            ejecucion_id=ejecucion_id,
         )
+        if own_batch and ejecucion_id is not None:
+            self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+
         new_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_p)
         diag_result["folder_data"] = FolderParser.parse(new_p.name)
@@ -1209,47 +1312,229 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = "✅ Movida a Correctos"
         diag_result["files_modified_count"] = res["files_moved_count"]
-
-        if self.mysql and self.mysql.enabled:
-            self.mysql.registrar_movimiento_carpeta(
-                tipo_movimiento="MOVIDO_A_CORRECTOS",
-                nombre_origen=Path(str(folder_path)).name,
-                nombre_destino=new_p.name,
-                ruta_origen=str(folder_path),
-                ruta_destino=str(new_p),
-                motivo="Carpeta validada con COINCIDE_TOTAL",
-                indice_colision=res.get("collision_index", 0)
-            )
-
         return res
 
-    def rollback_single_file(self, candidate: Dict[str, Any]):
-        return FileOperations.rollback_single_candidate(candidate, self.db, self.mysql)
+    # =========================================================================
+    # NUEVO FLUJO DE 3 PASOS + ROLLBACK POR LOTES (100% MYSQL)
+    # =========================================================================
 
-    def rollback_folder(self, initial_folder_path: str) -> Dict[str, Any]:
-        return FileOperations.rollback_folder_to_initial_state(initial_folder_path, self.db, self.mysql)
+    def ejecutar_paso1_indexar_y_renombrar(
+        self,
+        root_path: str,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        PASO 1:
+        1. Inicializa tablas MySQL si no existen.
+        2. Escanea todas las carpetas válidas y sus PDFs.
+        3. Indexa el estado ORIGINAL INICIAL en `carpetas_iniciales` y `archivos_iniciales` ANTES de renombrar.
+        4. Crea un lote en `ejecuciones_lotes` (PASO_1_INDEXAR_Y_RENOMBRAR).
+        5. Renombra cada carpeta por el nombre del 1er PDF hasta el año (regla de ceros y colisiones _2/_3),
+           registrando cada carpeta y archivo en `auditoria_movimientos_carpetas` y `auditoria_movimientos_archivos`.
+        """
+        self.reload_settings()
+        ok_db, msg_db = self.mysql.init_database_and_tables()
+        if not ok_db:
+            raise RuntimeError(f"No se pudo conectar/inicializar MySQL: {msg_db}")
 
-    def rollback_all(self) -> Dict[str, Any]:
-        return FileOperations.rollback_all_to_initial_state(self.db, self.mysql)
+        subfolders = self.get_valid_subfolders(root_path)
+        total = len(subfolders)
+        if total == 0:
+            return {
+                "total_carpetas": 0,
+                "nuevas_indexadas": 0,
+                "archivos_indexados": 0,
+                "renombradas": 0,
+                "errores": [],
+                "ejecucion_id": None,
+            }
+
+        carpetas_info: List[Dict[str, Any]] = []
+        for sf in subfolders:
+            pdfs = sorted(
+                [f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+                key=lambda x: x.name,
+            )
+            carpetas_info.append({
+                "nombre_original": sf.name,
+                "ruta_original": str(sf.resolve()),
+                "pdf_names": [p.name for p in pdfs],
+            })
+
+        total_idx, nuevas_idx, files_idx, uuid_map = self.mysql.indexar_estado_inicial(carpetas_info)
+        ejecucion_id = self.mysql.crear_ejecucion_lote(
+            tipo_ejecucion="PASO_1_INDEXAR_Y_RENOMBRAR",
+            detalles={"root_path": str(root_path), "total_carpetas": total, "nuevas_indexadas": nuevas_idx},
+        )
+
+        renamed_folders = 0
+        renamed_files = 0
+        errors: List[str] = []
+
+        for idx, sf in enumerate(subfolders, start=1):
+            if progress_cb:
+                progress_cb(idx, total, f"Paso 1 ({idx}/{total}): {sf.name}")
+            try:
+                pdfs = sorted(
+                    [f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+                    key=lambda x: x.name,
+                )
+                if not pdfs:
+                    continue
+
+                regulars = [
+                    p for p in pdfs
+                    if "CARATULA" not in p.name.upper()
+                    and not CaratulaInspector.is_irregular_reg_pdf_name(p.name)
+                ]
+                first_pdf = regulars[0] if regulars else pdfs[0]
+                p_data = FolderParser.parse(first_pdf.name)
+                if not p_data.get("anio_raw"):
+                    continue
+
+                f_data = FolderParser.parse(sf.name)
+                delegacion = str(f_data.get("delegacion") or p_data.get("delegacion") or "01")
+                clean_code = FileOperations.build_clean_folder_code(
+                    delegacion=delegacion,
+                    seccion=p_data.get("seccion_raw") or "00",
+                    libro=p_data.get("libro_raw") or "00",
+                    tomo=p_data.get("tomo_raw") or "00",
+                    volumen=p_data.get("volumen_raw") or "00",
+                    fraccionamiento=p_data.get("fraccionamiento_raw") or "00",
+                    anio=p_data.get("anio_raw") or "0000",
+                )
+                c_uuid = uuid_map.get(str(sf.resolve()))
+                target_folder_path = FileOperations.resolve_directory_collision(
+                    parent_dir=sf.parent,
+                    base_folder_name=clean_code,
+                    current_folder_path=sf,
+                ).resolve()
+
+                if target_folder_path != sf.resolve():
+                    old_folder_name = sf.name
+                    old_folder_str = str(sf.resolve())
+                    os.replace(old_folder_str, str(target_folder_path))
+                    renamed_folders += 1
+                    if self.mysql and getattr(self.mysql, "enabled", False) and c_uuid:
+                        self.mysql.registrar_movimiento_carpeta(
+                            ejecucion_id=ejecucion_id,
+                            carpeta_uuid=c_uuid,
+                            tipo_accion="RENOMBRADO_CARPETA",
+                            nombre_anterior=old_folder_name,
+                            nombre_nuevo=target_folder_path.name,
+                            ruta_anterior=old_folder_str,
+                            ruta_nueva=str(target_folder_path),
+                            cantidad_archivos=len(pdfs),
+                        )
+            except Exception as exc:
+                errors.append(f"{sf.name}: {exc}")
+
+        self.mysql.finalizar_ejecucion_lote(
+            ejecucion_id=ejecucion_id,
+            total_carpetas=renamed_folders,
+            total_archivos=renamed_files,
+            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+            detalles={"errores": errors[:20]} if errors else None,
+        )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "total_carpetas": total,
+            "nuevas_indexadas": nuevas_idx,
+            "archivos_indexados": files_idx,
+            "renombradas": renamed_folders,
+            "archivos_renombrados": renamed_files,
+            "errores": errors,
+        }
+
+    def ejecutar_paso3_trasladar_lote(
+        self,
+        results_list: List[Dict[str, Any]],
+        target_dir: str,
+        mode: str,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        PASO 3:
+        Traslada un lote de carpetas ('CORRECTOS' o 'APARTADOS') registrando la ejecución completa
+        en `ejecuciones_lotes` para permitir Rollback exacto por lote.
+        """
+        self.reload_settings()
+        is_correctos = str(mode).upper() == "CORRECTOS"
+        candidates = [
+            r for r in results_list
+            if (
+                (r.get("veredicto_global") == "COINCIDE_TOTAL" and not r.get("needs_apartar"))
+                if is_correctos
+                else r.get("needs_apartar")
+            )
+        ]
+        if not candidates:
+            return {"ejecucion_id": None, "movidas": 0, "archivos_movidos": 0, "errores": []}
+
+        tipo_ejec = "PASO_3_MOVER_CORRECTOS" if is_correctos else "PASO_3_MOVER_APARTADOS"
+        ejecucion_id = self.mysql.crear_ejecucion_lote(
+            tipo_ejecucion=tipo_ejec,
+            detalles={"target_dir": str(target_dir), "candidatos": len(candidates)},
+        )
+
+        movidas = 0
+        archivos_movidos = 0
+        errors: List[str] = []
+        total = len(candidates)
+
+        for idx, res in enumerate(candidates, start=1):
+            fname = res.get("folder_data", {}).get("folder_name") or Path(res.get("folder_path", "")).name
+            if progress_cb:
+                progress_cb(idx, total, f"Paso 3 ({idx}/{total}): {fname}")
+            try:
+                if is_correctos:
+                    mv = self.execute_move_to_validados(res, target_dir, ejecucion_id=ejecucion_id)
+                else:
+                    mv = self.execute_move_to_apartados(res, target_dir, ejecucion_id=ejecucion_id)
+                movidas += 1
+                archivos_movidos += int(mv.get("files_moved_count", 0))
+            except Exception as exc:
+                errors.append(f"{fname}: {exc}")
+
+        self.mysql.finalizar_ejecucion_lote(
+            ejecucion_id=ejecucion_id,
+            total_carpetas=movidas,
+            total_archivos=archivos_movidos,
+            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+            detalles={"errores": errors[:20]} if errors else None,
+        )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "movidas": movidas,
+            "archivos_movidos": archivos_movidos,
+            "errores": errors,
+        }
+
+    def obtener_historial_ejecuciones(self) -> List[Dict[str, Any]]:
+        return self.mysql.obtener_historial_ejecuciones()
+
+    def ejecutar_rollback_ultima_ejecucion(self) -> Dict[str, Any]:
+        return self.mysql.revertir_ultima_ejecucion()
 
     def full_system_reset(self, clear_cache: bool = False) -> Dict[str, Any]:
         """
-        Ejecuta el Rollback Físico Completo y posteriormente limpia todas las bases de datos:
-        1. Revierte todos los archivos físicos a su ruta, nombre y contenido original.
-        2. Limpia las tablas de SQLite (auditoria_libros.db).
-        3. Limpia las tablas de MySQL (trazabilidad_selloslibros) si está habilitado.
-        4. Opcionalmente limpia la caché local de Claude.
+        Revierte todos los lotes en orden cronológico inverso y limpia MySQL.
         """
-        # Paso 1: Rollback Físico de todos los archivos modificados
-        rb_res = self.rollback_all()
+        reverted_batches = 0
+        rb_errors: List[str] = []
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            while self.mysql.obtener_ultima_ejecucion_revertible():
+                rb = self.mysql.revertir_ultima_ejecucion()
+                if rb.get("success"):
+                    reverted_batches += 1
+                else:
+                    rb_errors.extend(rb.get("errores", [rb.get("error", "Error en rollback")]))
+                    break
 
-        # Paso 2: Limpieza de SQLite local
-        sqlite_ok, sqlite_msg = self.db.reset_database()
-
-        # Paso 3: Limpieza de MySQL si activo
         mysql_ok, mysql_msg = self.mysql.reset_database() if (self.mysql and getattr(self.mysql, "enabled", False)) else (True, "MySQL no activo")
 
-        # Paso 4: Limpieza de caché si solicitada
         cache_cleared = False
         if clear_cache:
             try:
@@ -1259,8 +1544,8 @@ class FolderOCRService:
                 pass
 
         return {
-            "rollback_result": rb_res,
-            "sqlite_reset": {"ok": sqlite_ok, "msg": sqlite_msg},
+            "reverted_batches": reverted_batches,
+            "rollback_errors": rb_errors,
             "mysql_reset": {"ok": mysql_ok, "msg": mysql_msg},
             "cache_cleared": cache_cleared,
         }

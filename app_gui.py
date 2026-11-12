@@ -896,14 +896,10 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
         if source == "MEMORIA":
             self.stats_data, self.comparison_items = self._load_memory_data()
             db_label = f"Sesión en Vivo: {len(self.parent_app.all_folder_items)} carpetas"
-        elif source == "MYSQL":
-            self.stats_data = self.service.mysql.get_executive_statistics() if self.service.mysql else {}
-            self.comparison_items = self.service.mysql.get_traceability_comparison() if self.service.mysql else []
-            db_label = "MySQL Server: trazabilidad_selloslibros"
         else:
-            self.stats_data = self.service.db.get_executive_statistics()
-            self.comparison_items = self.service.db.get_traceability_comparison()
-            db_label = "SQLite Local: auditoria_libros.db"
+            self.stats_data = self.service.mysql.get_executive_statistics() if self.service.mysql else {}
+            self.comparison_items = []
+            db_label = f"MySQL Server: {self.service.mysql.database}" if self.service.mysql else "MySQL"
 
         # 1. Actualizar Tarjetas KPI
         t_carp = self.stats_data.get("total_carpetas", 0)
@@ -2186,28 +2182,27 @@ class OCRLibrosApp(tk.Tk):
         menubar = tk.Menu(self)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas y Trazabilidad (Original vs Final)...", command=self.open_statistics_dashboard)
+        tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas MySQL (Original vs Final)...", command=self.open_statistics_dashboard)
         tools_menu.add_separator()
-        tools_menu.add_command(label="📁 Renombrar Carpetas por Primer PDF (con regla 0000)...", command=self.open_folder_renamer_dialog)
-        tools_menu.add_command(label="🔀 Separar Archivos Mezclados en Carpetas Nuevas...", command=self.open_folder_separator_dialog)
+        tools_menu.add_command(label="📁 Paso 1: Indexar en MySQL y Renombrar por 1er PDF", command=self.run_step1_index_and_rename_async)
+        tools_menu.add_command(label="🔍 Paso 2: Chequeo de Estructura + Diagnóstico General", command=self.start_batch_diagnosis)
+        tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
+        tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
         tools_menu.add_separator()
-        tools_menu.add_command(label="🗄 Conexión MySQL & Crear Tablas de Trazabilidad...", command=self.open_mysql_dialog)
+        tools_menu.add_command(label="🗄 Conexión MySQL & Crear Tablas (5 Tablas)...", command=self.open_mysql_dialog)
         tools_menu.add_separator()
-        tools_menu.add_command(label="⏪ Deshacer TODO (Rollback Físico al Origen Inicial)...", command=self.trigger_full_physical_rollback)
-        tools_menu.add_command(label="🧹 Reset Maestro de Sistema (Rollback Físico + Limpiar Bases de Datos a Cero)...", command=self.trigger_full_system_reset)
-        menubar.add_cascade(label="🛠 Trazabilidad Física y MySQL", menu=tools_menu)
+        tools_menu.add_command(label="⏪ Revertir Última Ejecución (Rollback Lote)...", command=self.trigger_rollback_last_batch)
+        tools_menu.add_command(label="🧹 Reset Maestro de Sistema (Revertir Todo + Limpiar MySQL)...", command=self.trigger_full_system_reset)
+        menubar.add_cascade(label="🛠 Flujo MySQL y Rollback", menu=tools_menu)
 
         config_menu = tk.Menu(menubar, tearoff=0)
         config_menu.add_command(label="⚙ Configurar API Key y Caché...", command=self.open_settings_dialog)
-        config_menu.add_command(
-            label="⏪ Abrir Centro de Rollback y Base de Datos SQLite...",
-            command=self.open_rollback_dialog
-        )
+        config_menu.add_command(label="🗄 Configurar MySQL...", command=self.open_mysql_dialog)
         config_menu.add_separator()
         config_menu.add_command(label="🗑 Limpiar Caché Local en Disco", command=self._clear_cache_from_menu)
         config_menu.add_separator()
         config_menu.add_command(label="Salir", command=self.quit)
-        menubar.add_cascade(label="⚙ Configuración, SQLite y Rollback", menu=config_menu)
+        menubar.add_cascade(label="⚙ Configuración", menu=config_menu)
         self.config(menu=menubar)
 
     def _create_widgets(self):
@@ -2489,10 +2484,10 @@ class OCRLibrosApp(tk.Tk):
             command=self.move_selected_folder_to_validados
         ).pack(side=tk.LEFT)
 
-        # --- TARJETA 2: Automatizaciones y Acciones Masivas por Lote ---
+        # --- TARJETA 2: Flujo Guiado en 3 Pasos (Ejecución Asíncrona por Lotes) ---
         card_batch = ttk.LabelFrame(
             tools_container,
-            text=" ⚡ 2. Correcciones Masivas y Lotes (Ejecución Asíncrona sin Bloquear la Ventana) ",
+            text=" 🚀 2. Flujo Guiado por Lotes (950 Carpetas = 950 Carpetas, 100% MySQL) ",
             padding=6,
             style="Card.TLabelframe"
         )
@@ -2502,100 +2497,62 @@ class OCRLibrosApp(tk.Tk):
         row_b1.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
             row_b1,
-            text="⚡ Aplicar TODAS las Correcciones Físicas (Hojas + Carátulas + Renombres)",
+            text="📁 1. Indexar Estado Inicial en MySQL y Renombrar por 1er PDF",
             style="Primary.TButton",
-            command=self.batch_apply_all_corrections
+            command=self.run_step1_index_and_rename_async
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_b1,
-            text="🛠 Reemplazar Hojas en Blanco (TODAS)",
-            style="Warning.TButton",
-            command=self.batch_replace_all_blank_pages
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            row_b1,
-            text="✏️ Aplicar Renombre (TODAS las Discrepancias)",
+            text="🔍 2. Chequeo de Estructura + Diagnóstico General (IA)",
             style="Action.TButton",
-            command=self.batch_rename_all_discrepancies
+            command=self.start_batch_diagnosis
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         row_b2 = ttk.Frame(card_batch)
         row_b2.pack(fill=tk.X)
         ttk.Button(
             row_b2,
-            text="📦 Enviar TODAS a Revisión / Apartados (por Subcarpeta de Error)",
+            text="📦 3A. Mover TODAS las Apartadas (por Subcarpeta de Error)",
             style="Warning.TButton",
-            command=self.batch_move_all_blank_caratulas
+            command=self.run_step3_move_apartados_async
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_b2,
-            text="✅ Mover TODAS las Carpetas Correctas (COINCIDE TOTAL) a Dir. Correctos",
+            text="✅ 3B. Mover TODAS las Correctas (COINCIDE TOTAL) a Dir. Correctos",
             style="Success.TButton",
-            command=self.batch_move_all_validados
+            command=self.run_step3_move_correctos_async
         ).pack(side=tk.LEFT)
 
-        # --- TARJETA 3: Auditoría, Trazabilidad y Control Físico ---
+        # --- TARJETA 3: Trazabilidad MySQL, Estadísticas y Rollback por Lote ---
         card_audit = ttk.LabelFrame(
             tools_container,
-            text=" 🛡️ 3. Auditoría de Congruencia (BD vs Disco), Trazabilidad y Rollback ",
+            text=" 🛡️ 3. Trazabilidad MySQL y Rollback por Lote ",
             padding=6,
             style="Card.TLabelframe"
         )
         card_audit.pack(fill=tk.X, pady=(0, 4))
 
-        row_a1 = ttk.Frame(card_audit)
-        row_a1.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(
-            row_a1,
-            text="🔍 Auditar Congruencia (BD vs Disco Físico)",
-            style="Info.TButton",
-            command=self.audit_congruence_async
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            row_a1,
-            text="⚡ Resincronizar Todo con Disco (Confirmado)",
-            style="Success.TButton",
-            command=self.resync_with_disk_confirmed
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            row_a1,
-            text="🔀 Separar Archivos Mezclados (Libros/Secciones Distintos)",
-            style="Action.TButton",
-            command=self.open_folder_separator_dialog
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            row_a1,
-            text="📁 Renombrar Carpetas por 1er PDF (hasta Año + Regla 0000)",
-            style="Primary.TButton",
-            command=self.open_folder_renamer_dialog
-        ).pack(side=tk.LEFT)
-
         row_a2 = ttk.Frame(card_audit)
         row_a2.pack(fill=tk.X)
         ttk.Button(
             row_a2,
-            text="🗄 Conexión MySQL & Trazabilidad",
+            text="🗄 Conexión MySQL & Tablas",
             command=self.open_mysql_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_a2,
-            text="📊 Estadísticas (Original vs Final)",
+            text="📊 Estadísticas MySQL (Original vs Final)",
             command=self.open_statistics_dashboard
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_a2,
-            text="⏪ Deshacer TODO (Rollback Físico al Origen Inicial)",
+            text="⏪ Revertir Última Ejecución (Rollback Lote)",
             style="Action.TButton",
-            command=self.trigger_full_physical_rollback
+            command=self.trigger_rollback_last_batch
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_a2,
-            text="📁 Revertir Solo Carpeta Seleccionada",
-            command=self.rollback_selected_folder_direct
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            row_a2,
-            text="🧹 Reset Maestro de Sistema",
+            text="🧹 Reset Maestro (Revertir Todo + Limpiar MySQL)",
             style="Danger.TButton",
             command=self.trigger_full_system_reset
         ).pack(side=tk.LEFT)
@@ -2624,7 +2581,7 @@ class OCRLibrosApp(tk.Tk):
         self.notebook_tabs.add(self.tab_pending, text="⚠ Pendientes por Corregir / Apartar (0)")
         self.notebook_tabs.add(self.tab_ready, text="✔ Listas / Correctas (0)")
         self.notebook_tabs.add(self.tab_done, text="✅ Ya Hecho / Cambios Aplicados (0)")
-        self.notebook_tabs.add(self.tab_audit, text="🔍 Auditoría de Congruencia (BD vs Disco) (0)")
+        self.notebook_tabs.add(self.tab_audit, text="⏪ Historial de Ejecuciones y Rollback")
 
         self.tree_folders = self._build_folder_treeview(self.tab_all)
         self.tree_pending = self._build_folder_treeview(self.tab_pending)
@@ -2689,63 +2646,59 @@ class OCRLibrosApp(tk.Tk):
         scroll_done.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_done.bind("<<TreeviewSelect>>", lambda e: self._on_folder_selected(e, self.tree_done))
 
-        # Pestaña 5: Auditoría de Congruencia (BD vs Disco Físico)
+        # Pestaña 5: Historial de Ejecuciones y Rollback por Lote (MySQL)
         audit_toolbar = ttk.Frame(self.tab_audit)
         audit_toolbar.pack(fill=tk.X, pady=(0, 4))
         self.lbl_audit_summary = ttk.Label(
             audit_toolbar,
-            text="Compara el estado en memoria/BD contra la realidad física del disco en red.",
+            text="Historial de ejecuciones por lotes en MySQL (Rollback estricto en orden cronológico inverso).",
             font=("Segoe UI", 9, "bold"),
             foreground="#0369a1"
         )
         self.lbl_audit_summary.pack(side=tk.LEFT, padx=(4, 10))
         ttk.Button(
             audit_toolbar,
-            text="🔍 Auditar Congruencia Ahora",
+            text="🔄 Actualizar Historial",
             style="Primary.TButton",
-            command=self.audit_congruence_async
+            command=self.refresh_execution_history
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             audit_toolbar,
-            text="⚡ Resincronizar Todo con Disco (Confirmado)",
-            style="Success.TButton",
-            command=self.resync_with_disk_confirmed
+            text="⏪ Revertir Última Ejecución",
+            style="Danger.TButton",
+            command=self.trigger_rollback_last_batch
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         audit_table_frame = ttk.Frame(self.tab_audit)
         audit_table_frame.pack(fill=tk.BOTH, expand=True)
-        audit_cols = (
-            "num",
-            "carpeta",
-            "estado_memoria",
-            "caratula_disco",
-            "pdfs_disco",
-            "discrepancias",
-            "accion_sugerida",
+        history_cols = (
+            "id",
+            "tipo_ejecucion",
+            "fecha_inicio",
+            "total_carpetas",
+            "total_archivos",
+            "estado",
         )
-        self.tree_audit = ttk.Treeview(audit_table_frame, columns=audit_cols, show="headings", height=20)
-        self.tree_audit.heading("num", text="#")
-        self.tree_audit.heading("carpeta", text="Carpeta")
-        self.tree_audit.heading("estado_memoria", text="Estado en Memoria / BD")
-        self.tree_audit.heading("caratula_disco", text="Carátula Física en Disco")
-        self.tree_audit.heading("pdfs_disco", text="PDFs en Disco")
-        self.tree_audit.heading("discrepancias", text="Discrepancia Detectada")
-        self.tree_audit.heading("accion_sugerida", text="Acción de Sincronización")
+        self.tree_history = ttk.Treeview(audit_table_frame, columns=history_cols, show="headings", height=20)
+        self.tree_history.heading("id", text="ID Lote")
+        self.tree_history.heading("tipo_ejecucion", text="Tipo de Ejecución")
+        self.tree_history.heading("fecha_inicio", text="Fecha / Hora")
+        self.tree_history.heading("total_carpetas", text="Carpetas")
+        self.tree_history.heading("total_archivos", text="Archivos")
+        self.tree_history.heading("estado", text="Estado")
 
-        self.tree_audit.column("num", width=42, anchor=tk.CENTER, stretch=False)
-        self.tree_audit.column("carpeta", width=220, anchor=tk.W)
-        self.tree_audit.column("estado_memoria", width=175, anchor=tk.CENTER)
-        self.tree_audit.column("caratula_disco", width=230, anchor=tk.W)
-        self.tree_audit.column("pdfs_disco", width=95, anchor=tk.CENTER)
-        self.tree_audit.column("discrepancias", width=285, anchor=tk.W)
-        self.tree_audit.column("accion_sugerida", width=220, anchor=tk.W)
+        self.tree_history.column("id", width=70, anchor=tk.CENTER, stretch=False)
+        self.tree_history.column("tipo_ejecucion", width=260, anchor=tk.W)
+        self.tree_history.column("fecha_inicio", width=180, anchor=tk.CENTER)
+        self.tree_history.column("total_carpetas", width=110, anchor=tk.CENTER)
+        self.tree_history.column("total_archivos", width=110, anchor=tk.CENTER)
+        self.tree_history.column("estado", width=180, anchor=tk.CENTER)
 
-        self._configure_tree_tags(self.tree_audit)
-        scroll_audit = ttk.Scrollbar(audit_table_frame, orient=tk.VERTICAL, command=self.tree_audit.yview)
-        self.tree_audit.configure(yscrollcommand=scroll_audit.set)
-        self.tree_audit.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_audit.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree_audit.bind("<<TreeviewSelect>>", lambda e: self._on_folder_selected(e, self.tree_audit))
+        self._configure_tree_tags(self.tree_history)
+        scroll_history = ttk.Scrollbar(audit_table_frame, orient=tk.VERTICAL, command=self.tree_history.yview)
+        self.tree_history.configure(yscrollcommand=scroll_history.set)
+        self.tree_history.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_history.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.active_tree = self.tree_folders
         self.notebook_tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -2817,66 +2770,189 @@ class OCRLibrosApp(tk.Tk):
             return
         ManualEditDialog(self, res)
 
-    def trigger_full_physical_rollback(self):
+    def run_step1_index_and_rename_async(self):
         """
-        Ejecuta el Rollback Físico Total de todos los archivos y carpetas modificados,
-        restaurándolos a como estaban antes de correr cualquier proceso por primera vez.
+        Paso 1 (Asíncrono): Indexa las 950 carpetas y sus PDFs en MySQL (estado original inicial)
+        y renombra cada carpeta por el nombre del 1er PDF hasta el año.
         """
-        candidates = self.service.db.get_rollback_candidates()
-        if not candidates:
-            messagebox.showinfo(
-                "Sin Cambios Pendientes",
-                "No hay archivos modificados pendientes por revertir en la base de datos.\n\n"
-                "Todos los archivos y carpetas ya se encuentran en su estado original.",
-                parent=self
-            )
+        root_p = self.path_var.get().strip()
+        if not root_p or not os.path.isdir(root_p):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
             return
 
-        folders_affected = set(c.get("nombre_carpeta_inicial") for c in candidates)
-        msg = (
-            "⏪ CONFIRMAR ROLLBACK TOTAL FÍSICO (DESHACER TODO)\n\n"
-            f"Se revertirán físicamente {len(candidates):,} archivo(s) de {len(folders_affected):,} carpeta(s) original(es).\n\n"
-            "Acciones de restauración inmediata:\n"
-            "  ✔ Todos los PDFs renombrados volverán a su nombre original.\n"
-            "  ✔ Todos los archivos movidos a apartados/validados volverán a su carpeta original.\n"
-            "  ✔ Hojas en blanco sustituidas volverán a su estado binario original (desde backup).\n"
-            "  ✔ Carpetas de destino vacías serán eliminadas limpiamente.\n\n"
-            "¿Deseas ejecutar el Rollback Total Físico ahora?"
-        )
-        if not messagebox.askyesno("⚠️ Confirmar Deshacer Todo (Rollback)", msg, icon="warning", parent=self):
+        if not messagebox.askyesno(
+            "Paso 1: Indexar en MySQL y Renombrar",
+            f"Se indexarán todas las carpetas y PDFs de:\n{root_p}\n\n"
+            "en MySQL (tablas `carpetas_iniciales` y `archivos_iniciales`) y posteriormente "
+            "se renombrarán por su 1er PDF hasta el año.\n\n¿Continuar?",
+            parent=self
+        ):
             return
 
-        res = self.service.rollback_all()
+        def _worker():
+            self.after(0, lambda: self.lbl_status.config(text="Paso 1: Indexando en MySQL y renombrando..."))
+            try:
+                res = self.service.ejecutar_paso1_indexar_y_renombrar(
+                    root_p,
+                    progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+                )
+                self.after(0, lambda r=res: self._on_step1_finished(r))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): messagebox.showerror("Error Paso 1", e, parent=self))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_step1_finished(self, res: Dict[str, Any]):
         self.reload_root_preview()
+        self.refresh_execution_history()
+        self._refresh_header_badge()
+        errs = res.get("errores", [])
+        msg = (
+            f"Paso 1 completado (Lote #{res.get('ejecucion_id')}):\n"
+            f"• Carpetas totales: {res.get('total_carpetas', 0)}\n"
+            f"• Nuevas indexadas en MySQL: {res.get('nuevas_indexadas', 0)}\n"
+            f"• Archivos PDF indexados: {res.get('archivos_indexados', 0)}\n"
+            f"• Carpetas renombradas: {res.get('renombradas', 0)}\n"
+            f"• PDFs renombrados: {res.get('archivos_renombrados', 0)}"
+        )
+        if errs:
+            msg += f"\n\nAvisos ({len(errs)}):\n" + "\n".join(errs[:5])
+            messagebox.showwarning("Paso 1 con Avisos", msg, parent=self)
+        else:
+            messagebox.showinfo("Paso 1 Completado", msg, parent=self)
 
-        if res.get("errors"):
-            messagebox.showwarning(
-                "Rollback con Avisos",
-                f"Archivos restaurados exitosamente: {res['restored_count']}/{res['total_candidates']}\n\n"
-                f"Avisos ({len(res['errors'])}):\n" + "\n".join(res["errors"][:8]),
-                parent=self
+    def run_step3_move_correctos_async(self):
+        """Paso 3B (Asíncrono): Mueve todas las carpetas COINCIDE_TOTAL a Dir. Correctos en un lote MySQL."""
+        validados_dir = self.validados_var.get().strip()
+        if not validados_dir:
+            messagebox.showwarning("Atención", "Configura primero el directorio de 'Correctos'.", parent=self)
+            return
+        targets = [r for r in self.all_folder_items if r.get("veredicto_global") == "COINCIDE_TOTAL" and not r.get("needs_apartar")]
+        if not targets:
+            messagebox.showinfo("Sin Pendientes", "No hay carpetas listas (COINCIDE_TOTAL) para mover a Correctos.", parent=self)
+            return
+        if not messagebox.askyesno("Paso 3B: Mover Correctas", f"Se moverán {len(targets)} carpeta(s) a:\n{validados_dir}\n\n¿Continuar?", parent=self):
+            return
+
+        def _worker():
+            res = self.service.ejecutar_paso3_trasladar_lote(
+                self.all_folder_items,
+                validados_dir,
+                mode="CORRECTOS",
+                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+            )
+            self.after(0, lambda r=res: self._on_step3_finished("Correctos", r))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def run_step3_move_apartados_async(self):
+        """Paso 3A (Asíncrono): Mueve todas las carpetas con discrepancias/apartar a Dir. Apartados en un lote MySQL."""
+        apartados_dir = self.apartados_var.get().strip()
+        if not apartados_dir:
+            messagebox.showwarning("Atención", "Configura primero el directorio de 'Apartados'.", parent=self)
+            return
+        targets = [r for r in self.all_folder_items if r.get("needs_apartar")]
+        if not targets:
+            messagebox.showinfo("Sin Pendientes", "No hay carpetas marcadas para Apartados.", parent=self)
+            return
+        if not messagebox.askyesno("Paso 3A: Mover Apartadas", f"Se moverán {len(targets)} carpeta(s) a:\n{apartados_dir}\n\n¿Continuar?", parent=self):
+            return
+
+        def _worker():
+            res = self.service.ejecutar_paso3_trasladar_lote(
+                self.all_folder_items,
+                apartados_dir,
+                mode="APARTADOS",
+                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+            )
+            self.after(0, lambda r=res: self._on_step3_finished("Apartados", r))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_step3_finished(self, dest_label: str, res: Dict[str, Any]):
+        self._refresh_all_tabs()
+        self.refresh_execution_history()
+        self._refresh_header_badge()
+        messagebox.showinfo(
+            f"Paso 3 ({dest_label}) Completado",
+            f"Lote #{res.get('ejecucion_id')} finalizado:\n"
+            f"• Carpetas movidas: {res.get('movidas', 0)}\n"
+            f"• Archivos movidos: {res.get('archivos_movidos', 0)}\n"
+            f"• Errores: {len(res.get('errores', []))}",
+            parent=self
+        )
+
+    def refresh_execution_history(self):
+        """Recarga la tabla del Historial de Ejecuciones desde MySQL."""
+        if not hasattr(self, "tree_history"):
+            return
+        for item in self.tree_history.get_children():
+            self.tree_history.delete(item)
+        rows = self.service.obtener_historial_ejecuciones()
+        for row in rows:
+            tag = "ok" if row.get("estado") == "COMPLETADO" else ("diff" if row.get("estado") == "REVERTIDO" else "")
+            self.tree_history.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("id"),
+                    row.get("tipo_ejecucion"),
+                    str(row.get("fecha_inicio") or ""),
+                    row.get("total_carpetas", 0),
+                    row.get("total_archivos", 0),
+                    row.get("estado"),
+                ),
+                tags=(tag,) if tag else (),
+            )
+
+    def trigger_rollback_last_batch(self):
+        """Revierte estrictamente la última ejecución completada en orden cronológico inverso."""
+        last_exec = self.service.mysql.obtener_ultima_ejecucion_revertible() if self.service.mysql else None
+        if not last_exec:
+            messagebox.showinfo("Sin Lotes Revertibles", "No hay ejecuciones activas pendientes por revertir en MySQL.", parent=self)
+            return
+
+        if not messagebox.askyesno(
+            "⏪ Confirmar Rollback de Último Lote",
+            f"Se revertirá únicamente la última ejecución:\n\n"
+            f"• Lote ID: #{last_exec['id']}\n"
+            f"• Tipo: {last_exec['tipo_ejecucion']}\n"
+            f"• Carpetas afectadas: {last_exec.get('total_carpetas', 0)}\n"
+            f"• Archivos afectados: {last_exec.get('total_archivos', 0)}\n\n"
+            "¿Deseas restaurar los nombres y rutas exactamente al estado previo a esta ejecución?",
+            icon="warning",
+            parent=self,
+        ):
+            return
+
+        res = self.service.ejecutar_rollback_ultima_ejecucion()
+        self.reload_root_preview()
+        self.refresh_execution_history()
+        self._refresh_header_badge()
+        if res.get("success"):
+            messagebox.showinfo(
+                "✔ Rollback Completado",
+                f"Lote #{res.get('ejecucion_id')} revertido:\n"
+                f"• Carpetas restauradas: {res.get('folders_reverted', 0)}\n"
+                f"• Archivos restaurados: {res.get('files_reverted', 0)}",
+                parent=self,
             )
         else:
-            messagebox.showinfo(
-                "✔ Rollback Total Concluido",
-                f"¡Se han restaurado exitosamente {res['restored_count']} archivo(s) a su estado original!\n\n"
-                "Todos los archivos y carpetas han vuelto exactamente a como estaban antes del primer cambio.",
-                parent=self
+            messagebox.showwarning(
+                "Rollback con Avisos",
+                f"Errores:\n" + "\n".join(res.get("errors", [res.get("error", "Error desconocido")])[:8]),
+                parent=self,
             )
 
     def trigger_full_system_reset(self):
         """
-        Rollback Físico Completo + Limpieza / Reinicio de Bases de Datos (SQLite y MySQL) a cero absoluto.
-        Deja el sistema tal como estaba antes de correr cualquier análisis por primera vez.
+        Revierte todos los lotes en orden cronológico inverso y limpia las 5 tablas de MySQL.
         """
-        candidates = self.service.db.get_rollback_candidates()
         msg1 = (
-            "🚨 ATENCIÓN: RESET MAESTRO DE SISTEMA Y BASES DE DATOS\n\n"
+            "🚨 ATENCIÓN: RESET MAESTRO DE SISTEMA Y MYSQL\n\n"
             "Esta acción realizará un restablecimiento TOTAL:\n"
-            f"1. Rollback Físico Completo: Restaurará los {len(candidates):,} archivo(s) a su nombre y ubicación inicial.\n"
-            "2. Reinicio de SQLite: Vaciará las tablas 'movimientos_archivos' y 'detecciones' de auditoría.\n"
-            "3. Reinicio de MySQL: Truncará las tablas de trazabilidad y diagnóstico en el servidor MySQL.\n\n"
-            "El sistema quedará en CERO ABSOLUTO, tal como estaba antes de correr cualquier diagnóstico por primera vez.\n\n"
+            "1. Rollback por Lotes: Revertirá en orden inverso todas las ejecuciones activas en MySQL.\n"
+            "2. Reinicio de MySQL: Vaciará las 5 tablas de trazabilidad e índices en MySQL.\n\n"
             "¿Estás seguro de que deseas continuar?"
         )
         if not messagebox.askyesno("🚨 Confirmar Reset Maestro (Paso 1 de 2)", msg1, icon="warning", parent=self):
@@ -2884,24 +2960,21 @@ class OCRLibrosApp(tk.Tk):
 
         clear_cache = messagebox.askyesno(
             "Caché de Inteligencia Artificial (Paso 2 de 2)",
-            "¿Deseas también vaciar la caché local de análisis de Claude?\n\n"
-            "• 'Sí': Borra la caché de la IA para iniciar un análisis 100% fresco desde cero.\n"
-            "• 'No': Conserva la caché local para ahorrar tokens en futuros análisis.",
+            "¿Deseas también vaciar la caché local de análisis de Claude?",
             parent=self
         )
 
         res = self.service.full_system_reset(clear_cache=clear_cache)
-        rb_info = res["rollback_result"]
         self.reload_root_preview()
+        self.refresh_execution_history()
+        self._refresh_header_badge()
 
         messagebox.showinfo(
             "✔ Reset Maestro Completado",
-            f"El sistema ha vuelto a su estado original inicial:\n\n"
-            f"• Archivos restaurados físicamente: {rb_info['restored_count']}/{rb_info['total_candidates']}\n"
-            f"• Base de datos SQLite: {res['sqlite_reset']['msg']}\n"
+            f"El sistema ha vuelto a su estado inicial:\n\n"
+            f"• Lotes revertidos físicamente: {res.get('reverted_batches', 0)}\n"
             f"• Base de datos MySQL: {res['mysql_reset']['msg']}\n"
-            f"• Caché local de Claude: {'Vaciada' if res['cache_cleared'] else 'Conservada'}\n\n"
-            "Todo ha quedado limpio y en su estado inicial.",
+            f"• Caché local de Claude: {'Vaciada' if res['cache_cleared'] else 'Conservada'}",
             parent=self
         )
 
@@ -2950,10 +3023,9 @@ class OCRLibrosApp(tk.Tk):
         masked = f"{key[:12]}...{key[-5:]}" if len(key) > 20 else ("Configurada" if key else "SIN KEY")
         model = cfg.get("model", "claude-sonnet-5")
         stats = self.service.cache.get_summary()
-        rb_count = len(self.service.db.get_rollback_candidates())
-        my_status = "🐬 MySQL: Activo" if (hasattr(self, "mysql_manager") and self.mysql_manager.enabled) else "MySQL: Off"
+        my_status = f"🐬 MySQL: {self.service.mysql.database}" if (self.service.mysql and self.service.mysql.enabled) else "MySQL: Off"
         self.lbl_api_badge.config(
-            text=f"Modelo: {model} | Key: {masked} | Caché: {stats['cached_documents_on_disk']} | {my_status} | Rollback activos: {rb_count}"
+            text=f"Modelo: {model} | Key: {masked} | Caché: {stats['cached_documents_on_disk']} | {my_status}"
         )
 
     def browse_folder(self):
@@ -4448,8 +4520,8 @@ def launch_gui():
         svc = FolderOCRService()
         out_check = Path(sys.executable).resolve().parent / "self_test_ok.txt"
         out_check.write_text(
-            f"OK: ClaudeVisionEngine + CacheManager + DatabaseManager + CaratulaInspector + FileOperations "
-            f"initialized (model={svc.settings.get('model')}, db={svc.db.db_path.name}).",
+            f"OK: ClaudeVisionEngine + CacheManager + MySQLManager + CaratulaInspector + FileOperations "
+            f"initialized (model={svc.settings.get('model')}, mysql={svc.mysql.database}).",
             encoding="utf-8"
         )
         sys.exit(0)
