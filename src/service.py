@@ -223,6 +223,17 @@ class FolderOCRService:
                 "propuestas_ceros": [],
                 "detalles_campos": {},
             }
+            has_dup = len(insp.get("dup_pdfs", [])) > 0
+            has_reg = len(insp.get("irregular_pdfs", [])) > 0
+            if has_dup and has_reg:
+                sub_rev = "ARCHIVOS CON DUP Y REG"
+            elif has_reg:
+                sub_rev = "ARCHIVOS IRREGULARES REG"
+            elif has_dup:
+                sub_rev = "ARCHIVOS CON DUP"
+            else:
+                sub_rev = "CARATULA EN BLANCO"
+
             result = {
                 "folder_path": str(folder_p),
                 "folder_data": folder_data,
@@ -234,9 +245,9 @@ class FolderOCRService:
                 "ocr_consolidado": ocr_final,
                 "comparacion": comparison,
                 "veredicto_global": "APARTAR_CARATULA_BLANCA",
-                "subcarpeta_revision": "CARATULA EN BLANCO",
+                "subcarpeta_revision": sub_rev,
                 "codigo_base_sugerido": clean_current_code,
-                "needs_page_replacement": False,
+                "needs_page_replacement": len(insp.get("replaceable_pdfs", [])) > 0,
                 "needs_rename": folder_p.name != clean_current_code,
                 "needs_apartar": True,
                 "has_discrepancy": True,
@@ -480,20 +491,46 @@ class FolderOCRService:
                         comparison = FolderComparator.compare(folder_data, ocr_final)
                         found_any_ocr_info = True
 
-        if not found_any_ocr_info:
-            # Regla solicitada: Si no se encuentra información alguna en la carátula,
-            # dejar el nombre de la carpeta tal cual, solo limpiándolo hasta el año
-            # (y adaptándolo con _2, _3 si hay colisiones al renombrar o apartar).
-            codigo_sugerido = clean_current_code
-            needs_page_replacement = (c_status == "REEMPLAZABLE_HOJA_BLANCA")
-            needs_rename = (folder_p.name != clean_current_code)
-            veredicto_global = "SIN_INFO_LIMPIAR_NOMBRE" if needs_rename else "SIN_INFO_MANTENER_NOMBRE"
-            subcarpeta_revision = "CARATULA SIN DATOS"
-            needs_apartar = True
-            ocr_final["evidencias_globales"].append(
-                f"ℹ Sin información extraíble en carátula (revisadas pág(s). {pages_label}): se conserva el nombre actual limpio ('{clean_current_code}') "
-                f"y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
-            )
+        # Criterio estricto para Carátula Embebida:
+        # Solo se considera Carátula Válida si contiene datos objetivos de apertura de libro (Libro y Año válidos).
+        is_embedded_candidate = (c_status == "CARATULA_EMBEBIDA_CANDIDATA")
+        is_valid_embedded_caratula = False
+        if is_embedded_candidate:
+            has_valid_libro = str(ocr_final.get("libro", "00")).strip() not in ("00", "0", "0000", "", "None", "-", "null")
+            has_valid_anio = str(ocr_final.get("anio", "0000")).strip() not in ("0000", "0", "00", "", "None", "-", "null")
+            is_valid_embedded_caratula = found_any_ocr_info and has_valid_libro and has_valid_anio
+
+        embedded_to_create = None
+
+        if not found_any_ocr_info or (is_embedded_candidate and not is_valid_embedded_caratula):
+            if is_embedded_candidate:
+                # Regla solicitada: Si se probó la página 1 compartida pero no resultó ser una carátula válida
+                # (o es un documento particular/en blanco sin datos de libro), NO se pasa a correctos: se aparta.
+                codigo_sugerido = clean_current_code
+                needs_page_replacement = False
+                needs_rename = False
+                veredicto_global = "SIN_ARCHIVO_CARATULA"
+                subcarpeta_revision = "SIN ARCHIVO CARATULA"
+                needs_apartar = True
+                insp["status"] = "SIN_ARCHIVO_CARATULA"
+                ocr_final["evidencias_globales"].append(
+                    f"⚠ [CARÁTULA NO VÁLIDA] La Página 1 compartida en los archivos no contiene datos registrales válidos de apertura de libro "
+                    f"(Libro={ocr_final.get('libro')}, Año={ocr_final.get('anio')}). Se clasifica para revisión en '{subcarpeta_revision}'."
+                )
+            else:
+                # Regla normal: Si no se encuentra información alguna en la carátula,
+                # dejar el nombre de la carpeta tal cual, solo limpiándolo hasta el año
+                # (y adaptándolo con _2, _3 si hay colisiones al renombrar o apartar).
+                codigo_sugerido = clean_current_code
+                needs_page_replacement = (c_status == "REEMPLAZABLE_HOJA_BLANCA" or len(insp.get("replaceable_pdfs", [])) > 0)
+                needs_rename = (folder_p.name != clean_current_code)
+                veredicto_global = "SIN_INFO_LIMPIAR_NOMBRE" if needs_rename else "SIN_INFO_MANTENER_NOMBRE"
+                subcarpeta_revision = "CARATULA SIN DATOS"
+                needs_apartar = True
+                ocr_final["evidencias_globales"].append(
+                    f"ℹ Sin información extraíble en carátula (revisadas pág(s). {pages_label}): se conserva el nombre actual limpio ('{clean_current_code}') "
+                    f"y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
+                )
         else:
             # Construir el código base sugerido hasta el Año (conservando siempre posición 1 = Delegación)
             codigo_sugerido = FileOperations.build_clean_folder_code(
@@ -511,7 +548,24 @@ class FolderOCRService:
             needs_rename = (comp_veredicto != "COINCIDE_TOTAL") or (folder_p.name != codigo_sugerido)
             needs_apartar = False
 
-            if needs_page_replacement and comp_veredicto == "COINCIDE_TOTAL" and not needs_rename:
+            if is_embedded_candidate:
+                insp["status"] = "CARATULA_EMBEBIDA_VALIDA"
+                ocr_final["evidencias_globales"].append(
+                    f"✔ [CARÁTULA EMBEBIDA VÁLIDA] Se detectó y validó el Acta de Apertura compartida en la Página 1 de los archivos. "
+                    f"Se adopta como carátula oficial del libro y se clasifica para pasar a Correctos."
+                )
+                embedded_to_create = {
+                    "source_pdf": str(caratula_pdf_path),
+                    "page_num": 1,
+                    "target_name": f"{codigo_sugerido}_CARATULA_00.pdf",
+                }
+                if not needs_rename:
+                    veredicto_global = "COINCIDE_TOTAL"
+                elif comp_veredicto == "RELLENO_DE_CEROS_PROPUESTO":
+                    veredicto_global = "RELLENO_DE_CEROS_PROPUESTO"
+                else:
+                    veredicto_global = "RENOMBRAR_CARPETA"
+            elif needs_page_replacement and comp_veredicto == "COINCIDE_TOTAL" and not needs_rename:
                 veredicto_global = "REEMPLAZAR_HOJA_BLANCA"
             elif needs_page_replacement and needs_rename:
                 veredicto_global = "REEMPLAZAR_HOJA_Y_RENOMBRAR"
@@ -569,6 +623,7 @@ class FolderOCRService:
             "needs_rename": needs_rename,
             "needs_apartar": needs_apartar,
             "has_discrepancy": has_discrepancy,
+            "embedded_caratula_to_create": embedded_to_create,
             "cache_summary": self.cache.get_summary(),
         }
 
@@ -638,13 +693,14 @@ class FolderOCRService:
         insp["pdfs_with_blank_page"] = 0
         insp["replaceable_pdfs"] = []
         insp["summary_message"] = (
-            f"✔ Hoja en blanco reemplazada exitosamente por Pág. {info_page_num} en {res['replaced_count']} PDF(s)."
+            f"✔ Hoja de carátula aplicada exitosamente (Pág. {info_page_num}) en {res['replaced_count']} PDF(s) (archivos REG intactos)."
         )
-        if diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_BLANCA":
-            diag_result["veredicto_global"] = "COINCIDE_TOTAL"
-            diag_result["has_discrepancy"] = False
-        elif diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_Y_RENOMBRAR":
-            diag_result["veredicto_global"] = "DISCREPANCIA"
+        if not diag_result.get("needs_apartar"):
+            if diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_BLANCA":
+                diag_result["veredicto_global"] = "COINCIDE_TOTAL"
+                diag_result["has_discrepancy"] = False
+            elif diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_Y_RENOMBRAR":
+                diag_result["veredicto_global"] = "DISCREPANCIA"
 
         actions = list(diag_result.get("applied_actions", []))
         actions.append(f"🛠 Hoja blanca reemplazada ({res['replaced_count']} PDFs)")
@@ -697,12 +753,40 @@ class FolderOCRService:
 
         insp = diag_result.get("caratula_inspection", {})
         old_c_name = insp.get("caratula_filename", "")
-        if old_c_name and old_c_name not in ("SIN CARÁTULA", "NO DETECTADA", "ERROR"):
+        if old_c_name and old_c_name not in ("SIN CARÁTULA", "NO DETECTADA", "ERROR") and not old_c_name.startswith("[EMBEBIDA]"):
             new_c_name = FileOperations.build_new_pdf_name(old_c_name, res["clean_base_code"], old_name)
             new_c_path = new_folder_p / new_c_name
             if new_c_path.exists():
                 insp["caratula_filename"] = new_c_name
                 insp["caratula_path"] = str(new_c_path)
+
+        # Si había una carátula embebida pendiente de creación física en Fase 2:
+        emb_to_create = diag_result.get("embedded_caratula_to_create")
+        if emb_to_create:
+            target_c_name = f"{res['clean_base_code']}_CARATULA_00.pdf"
+            src_pdf = Path(emb_to_create["source_pdf"])
+            if not src_pdf.exists():
+                src_pdf = new_folder_p / src_pdf.name
+            if not src_pdf.exists():
+                candidates = [f for f in new_folder_p.glob("*.pdf") if "CARATULA" not in f.name]
+                if candidates:
+                    src_pdf = candidates[0]
+            if src_pdf.exists():
+                c_res = FileOperations.create_caratula_from_pdf_page(
+                    folder_path=new_folder_p,
+                    source_pdf_path=src_pdf,
+                    page_num=emb_to_create.get("page_num", 1),
+                    target_caratula_name=target_c_name,
+                    db_manager=self.db,
+                    mysql_manager=self.mysql,
+                )
+                if c_res.get("created"):
+                    insp["caratula_filename"] = target_c_name
+                    insp["caratula_path"] = str(new_folder_p / target_c_name)
+                    actions = list(diag_result.get("applied_actions", []))
+                    actions.append(f"📄 Carátula física extraída y creada: {target_c_name}")
+                    diag_result["applied_actions"] = actions
+
 
         ocr_final = diag_result.get("ocr_consolidado", {})
         found_any_ocr_info = any(
@@ -738,6 +822,44 @@ class FolderOCRService:
 
         return res
 
+    def execute_all_pending_corrections(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ejecuta en un solo paso todas las correcciones físicas pendientes en disco:
+        1. Reemplazo o inserción de carátula en PDFs regulares y DUP (excluyendo REG).
+        2. Extracción y creación física de carátula embebida si aplica.
+        3. Renombrado de carpeta y PDFs regulares y DUP (excluyendo REG).
+        Todo queda respaldado en SQLite y backups_rollback/ para Rollback total.
+        """
+        applied_now = []
+        modified_count = 0
+
+        # Paso 1: Reemplazo o inserción de carátulas si aplica
+        if diag_result.get("needs_page_replacement") and diag_result.get("caratula_inspection", {}).get("replaceable_pdfs"):
+            try:
+                rep_res = self.execute_page_replacement(diag_result)
+                cnt = rep_res.get("replaced_count", 0)
+                modified_count += cnt
+                applied_now.append(f"🛠 Carátula corregida en {cnt} PDF(s)")
+            except Exception as exc:
+                applied_now.append(f"⚠ Error al corregir carátula: {exc}")
+
+        # Paso 2: Renombrado de carpeta y PDFs (conservando DUP e ignorando REG)
+        if diag_result.get("needs_rename"):
+            try:
+                ren_res = self.execute_folder_and_pdfs_rename(diag_result)
+                cnt = ren_res.get("files_renamed_count", 0)
+                modified_count += cnt
+                applied_now.append(f"✏️ Renombrada carpeta y {cnt} PDF(s)")
+            except Exception as exc:
+                applied_now.append(f"⚠ Error al renombrar: {exc}")
+
+        return {
+            "success": True,
+            "modified_count": modified_count,
+            "applied_actions": applied_now,
+            "folder_path": diag_result.get("folder_path"),
+        }
+
     def execute_move_to_apartados(
         self,
         diag_result: Dict[str, Any],
@@ -749,6 +871,10 @@ class FolderOCRService:
         dentro de una subcarpeta con descripción rápida del error (ej. 'CARATULA EN BLANCO',
         'PDFS SIN CARATULA', 'CARATULA SIN DATOS', 'SIN ARCHIVO CARATULA', etc.).
         """
+        # Si la carpeta tiene correcciones físicas pendientes (hojas o renombre), aplicarlas antes de archivarla
+        if diag_result.get("needs_page_replacement") or diag_result.get("needs_rename"):
+            self.execute_all_pending_corrections(diag_result)
+
         folder_path = diag_result.get("folder_path", "")
         if not diag_result.get("initial_folder_path"):
             diag_result["initial_folder_path"] = str(folder_path)
@@ -809,6 +935,37 @@ class FolderOCRService:
         if not diag_result.get("initial_folder_path"):
             diag_result["initial_folder_path"] = str(folder_path)
             diag_result["initial_folder_name"] = Path(str(folder_path)).name
+
+        # Si tenía carátula embebida pendiente de creación física y no fue renombrada previamente:
+        emb_to_create = diag_result.get("embedded_caratula_to_create")
+        if emb_to_create:
+            folder_p = Path(folder_path)
+            target_c_name = emb_to_create.get("target_name") or f"{folder_p.name}_CARATULA_00.pdf"
+            src_pdf = Path(emb_to_create["source_pdf"])
+            if not src_pdf.exists():
+                src_pdf = folder_p / src_pdf.name
+            if not src_pdf.exists():
+                candidates = [f for f in folder_p.glob("*.pdf") if "CARATULA" not in f.name]
+                if candidates:
+                    src_pdf = candidates[0]
+            if src_pdf.exists():
+                c_file = folder_p / target_c_name
+                if not c_file.exists():
+                    c_res = FileOperations.create_caratula_from_pdf_page(
+                        folder_path=folder_p,
+                        source_pdf_path=src_pdf,
+                        page_num=emb_to_create.get("page_num", 1),
+                        target_caratula_name=target_c_name,
+                        db_manager=self.db,
+                        mysql_manager=self.mysql,
+                    )
+                    if c_res.get("created"):
+                        insp = diag_result.get("caratula_inspection", {})
+                        insp["caratula_filename"] = target_c_name
+                        insp["caratula_path"] = str(folder_p / target_c_name)
+                        actions = list(diag_result.get("applied_actions", []))
+                        actions.append(f"📄 Carátula física extraída y creada: {target_c_name}")
+                        diag_result["applied_actions"] = actions
 
         res = FileOperations.move_folder_to_validados(
             folder_path=folder_path,

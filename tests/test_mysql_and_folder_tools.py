@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 import tempfile
 import shutil
 from pathlib import Path
@@ -278,7 +279,13 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         # 3. Diagnosticar con FolderOCRService
         from src.service import FolderOCRService
         service = FolderOCRService(db_path=self.temp_dir / "test_apartados.db")
-        diag = service.process_folder(str(f_test), save_to_db=True)
+        mock_parsed = {
+            "seccion": 2, "libro": 5, "tomo": 0, "volumen": 0, "fraccionamiento": 0, "anio": 2000,
+            "es_auxiliar": False, "texto_descriptivo": "Acta 2000", "evidencias": ["L5 S2 2000"]
+        }
+        mock_usage = {"input_tokens": 500, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
 
         self.assertTrue(diag["needs_apartar"])
         self.assertTrue(diag["has_discrepancy"])
@@ -385,6 +392,407 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertEqual(int(diag["ocr_consolidado"]["seccion"]), 3)
         self.assertEqual(int(diag["ocr_consolidado"]["libro"]), 1)
         self.assertEqual(int(diag["ocr_consolidado"]["anio"]), 1994)
+
+    def test_11_embedded_caratula_in_sample_pdfs_routes_to_correctos(self):
+        """
+        Verifica que si una carpeta no tiene archivo de carátula pero sus PDFs comparten
+        la misma página 1 con acta oficial válida, se detecte la carátula embebida,
+        Claude la valide y se clasifique para Correctos (needs_apartar = False).
+        """
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1994"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        acta_text = (
+            "EL SUSCRITO SECRETARIO DE GOBIERNO DEL ESTADO DE CHIAPAS AUTORIZA EL PRESENTE "
+            "LIBRO NUMERO 1 UNO PARA LLEVAR EL DUPLICADO DE LA SECCION TERCERA DEL REGISTRO "
+            "PUBLICO DE LA PROPIEDAD Y DE COMERCIO PARA EL AÑO DE 1994"
+        )
+
+        for i in range(1, 4):
+            doc = fitz.open()
+            p1 = doc.new_page(width=612, height=792)
+            p1.insert_text((72, 120), acta_text, fontsize=12)
+            p2 = doc.new_page(width=612, height=792)
+            p2.insert_text((72, 120), f"INSCRIPCION NUMERO {i:04d} DEL REGISTRO", fontsize=12)
+            doc.save(str(f_test / f"01_00_00_00_00_00_0000_{i:04d}_00.pdf"))
+            doc.close()
+
+        insp = CaratulaInspector.inspect_folder(f_test)
+        self.assertEqual(insp["status"], "CARATULA_EMBEBIDA_CANDIDATA")
+        self.assertIsNotNone(insp.get("embedded_caratula_info"))
+        self.assertEqual(insp["embedded_caratula_info"]["sample_verified_count"], 3)
+
+        mock_parsed = {
+            "seccion": 3,
+            "libro": 1,
+            "tomo": None,
+            "volumen": None,
+            "fraccionamiento": None,
+            "anio": 1994,
+            "es_auxiliar": False,
+            "texto_descriptivo": "Acta de apertura Libro 1 Duplicado Sección 3 Año 1994",
+            "evidencias": ["Libro 1", "Sección 3", "Año 1994"]
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_embedded.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertFalse(diag["needs_apartar"])
+        self.assertEqual(diag["caratula_inspection"]["status"], "CARATULA_EMBEBIDA_VALIDA")
+        self.assertIsNotNone(diag.get("embedded_caratula_to_create"))
+        self.assertEqual(diag["codigo_base_sugerido"], "01_03_01_00_00_00_1994")
+        self.assertIn(diag["veredicto_global"], ("COINCIDE_TOTAL", "RELLENO_DE_CEROS_PROPUESTO", "RENOMBRAR_CARPETA"))
+
+    def test_12_embedded_page_without_caratula_info_routes_to_apartados(self):
+        """
+        Verifica que si la página 1 es un documento ajeno o no contiene libro/año válidos
+        (o está en blanco), NO se pase a correctos y se mantenga en SIN_ARCHIVO_CARATULA
+        con needs_apartar = True.
+        """
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1996_3"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        contract_text = (
+            "EN LA CIUDAD DE TUXTLA GUTIERREZ COMPARECE EL SR JUAN PEREZ ANTE NOTARIO PUBLICO "
+            "PARA FORMALIZAR TESTAMENTO PUBLICO ABIERTO SIN DATOS DE LIBRO DE REGISTRO"
+        )
+        for i in range(1, 4):
+            doc = fitz.open()
+            p1 = doc.new_page(width=612, height=792)
+            p1.insert_text((72, 120), contract_text, fontsize=12)
+            doc.save(str(f_test / f"01_00_00_00_00_00_0000_{i:04d}_00.pdf"))
+            doc.close()
+
+        mock_empty_parsed = {
+            "seccion": None,
+            "libro": None,
+            "tomo": None,
+            "volumen": None,
+            "fraccionamiento": None,
+            "anio": None,
+            "es_auxiliar": False,
+            "texto_descriptivo": "Testamento de particular sin apertura de libro",
+            "evidencias": ["No contiene acta de apertura"]
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_embedded_blank.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_empty_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertTrue(diag["needs_apartar"])
+        self.assertEqual(diag["veredicto_global"], "SIN_ARCHIVO_CARATULA")
+        self.assertEqual(diag["subcarpeta_revision"], "SIN ARCHIVO CARATULA")
+        self.assertIsNone(diag.get("embedded_caratula_to_create"))
+
+    def test_13_physical_caratula_creation_and_rollback(self):
+        """
+        Verifica que en Fase 2 se extraiga la página 1 y se cree físicamente
+        [codigo]_CARATULA_00.pdf conservando intactos los PDFs regulares,
+        y que un rollback elimine la carátula creada y restaure el estado original.
+        """
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1994_EMB"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        acta_text = "ACTA OFICIAL DE APERTURA DEL LIBRO NUMERO 2 SECCION PRIMERA 1994"
+        for i in range(1, 4):
+            doc = fitz.open()
+            p1 = doc.new_page(width=612, height=792)
+            p1.insert_text((72, 120), acta_text, fontsize=12)
+            p2 = doc.new_page(width=612, height=792)
+            p2.insert_text((72, 120), f"FOJA REGISTRAL NUMERO {i}", fontsize=12)
+            doc.save(str(f_test / f"01_00_00_00_00_00_0000_{i:04d}_00.pdf"))
+            doc.close()
+
+        mock_parsed = {
+            "seccion": 1,
+            "libro": 2,
+            "tomo": None,
+            "volumen": None,
+            "fraccionamiento": None,
+            "anio": 1994,
+            "es_auxiliar": False,
+            "texto_descriptivo": "Acta de apertura Libro 2 Sección 1 Año 1994",
+            "evidencias": ["Libro 2", "Sección 1", "Año 1994"]
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_physical_caratula.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        ren_res = service.execute_folder_and_pdfs_rename(diag)
+        new_f_path = Path(ren_res["new_folder_path"])
+        self.assertTrue(new_f_path.exists())
+
+        expected_caratula = new_f_path / f"{new_f_path.name}_CARATULA_00.pdf"
+        self.assertTrue(expected_caratula.exists())
+
+        doc_c = fitz.open(str(expected_caratula))
+        self.assertEqual(len(doc_c), 1)
+        self.assertIn("ACTA OFICIAL DE APERTURA", doc_c[0].get_text("text"))
+        doc_c.close()
+
+        reg_pdfs = [f for f in new_f_path.glob("*.pdf") if "CARATULA" not in f.name]
+        self.assertEqual(len(reg_pdfs), 3)
+        for r_pdf in reg_pdfs:
+            d_r = fitz.open(str(r_pdf))
+            self.assertEqual(len(d_r), 2)
+            d_r.close()
+
+        rb_res = service.rollback_all()
+        self.assertTrue(rb_res["success"])
+        self.assertFalse(expected_caratula.exists())
+        self.assertTrue(f_test.exists())
+
+    def test_14_blank_caratula_replaces_page_with_text_and_routes_to_apartados(self):
+        """
+        Verifica que si la carátula tiene 2 páginas y una de ellas tiene cualquier texto
+        (aunque no tenga datos de libro), se reemplace la hoja en blanco de los PDFs regulares,
+        pero los archivos REG se mantengan 100% intactos y la carpeta se archive en Apartados.
+        """
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1995"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        # Carátula: pág 1 en blanco, pág 2 con texto
+        caratula_pdf = f_test / "01_00_00_00_00_00_0000_CARATULA_00.pdf"
+        doc = fitz.open()
+        doc.new_page(width=612, height=792)  # Pág 1 blanca
+        p2 = doc.new_page(width=612, height=792)  # Pág 2 con texto/sello
+        p2.insert_text((72, 120), "ENCUADERNACION Y TALLERES GRAFICOS DEL ESTADO DE CHIAPAS", fontsize=12)
+        doc.save(str(caratula_pdf))
+        doc.close()
+
+        # Regular PDF con hoja blanca como pág 1
+        doc_reg = fitz.open()
+        doc_reg.new_page(width=612, height=792)  # Pág 1 blanca
+        doc_reg.new_page(width=612, height=792)  # Pág 2 contenido
+        doc_reg.save(str(f_test / "01_00_00_00_00_00_0000_0001_00.pdf"))
+        doc_reg.close()
+
+        # Archivo REG irregular
+        self._create_dummy_pdf(f_test / "REG_-60.pdf", text="DOCUMENTO REGULAR REG")
+
+        insp = CaratulaInspector.inspect_folder(f_test)
+        self.assertEqual(insp["info_page_num"], 2)
+        # Debe incluir el regular pero NUNCA el REG
+        rep_names = [Path(x["pdf_path"]).name for x in insp.get("replaceable_pdfs", [])]
+        self.assertIn("01_00_00_00_00_00_0000_0001_00.pdf", rep_names)
+        self.assertNotIn("REG_-60.pdf", rep_names)
+
+        mock_empty_parsed = {
+            "seccion": None, "libro": None, "tomo": None, "volumen": None, "fraccionamiento": None, "anio": None,
+            "es_auxiliar": False, "texto_descriptivo": "Sin datos registrales", "evidencias": []
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_blank_replace.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_empty_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertTrue(diag["needs_apartar"])
+        self.assertTrue(diag["needs_page_replacement"])
+
+        # Aplicar correcciones
+        res_corr = service.execute_all_pending_corrections(diag)
+        self.assertTrue(res_corr["success"])
+
+        # Verificar que el PDF regular ahora tiene el texto en pág 1
+        doc_chk = fitz.open(str(f_test / "01_00_00_00_00_00_0000_0001_00.pdf"))
+        self.assertIn("TALLERES GRAFICOS", doc_chk[0].get_text("text"))
+        doc_chk.close()
+
+        # Verificar que REG_-60.pdf sigue con 1 sola página intacta
+        doc_reg_chk = fitz.open(str(f_test / "REG_-60.pdf"))
+        self.assertEqual(len(doc_reg_chk), 1)
+        doc_reg_chk.close()
+
+    def test_15_totally_blank_caratula_inserts_blank_page_only_to_missing_and_ignores_reg(self):
+        """
+        Verifica que cuando la carátula está 100% en blanco, se inserte la hoja en blanco
+        únicamente a los PDFs regulares/DUP que carezcan de carátula, ignorando a los REG.
+        """
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1990"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        caratula_pdf = f_test / "01_00_00_00_00_00_0000_CARATULA_00.pdf"
+        doc = fitz.open()
+        doc.new_page(width=612, height=792)  # 100% blanca
+        doc.save(str(caratula_pdf))
+        doc.close()
+
+        # PDF 1 ya tiene la hoja blanca
+        doc1 = fitz.open()
+        doc1.new_page(width=612, height=792)  # Blanca
+        doc1.new_page(width=612, height=792)  # Contenido
+        doc1.save(str(f_test / "01_00_00_00_00_00_0000_0001_00.pdf"))
+        doc1.close()
+
+        # PDF 2 carece de carátula por completo (1 página de registro)
+        self._create_dummy_pdf(f_test / "01_00_00_00_00_00_0000_0002_00.pdf", text="REGISTRO SIN CARATULA")
+
+        # Archivo REG
+        self._create_dummy_pdf(f_test / "REG_12.pdf", text="REGULAR REG")
+
+        insp = CaratulaInspector.inspect_folder(f_test)
+        self.assertEqual(insp["status"], "TOTALMENTE_BLANCA")
+        rep_names = [Path(x["pdf_path"]).name for x in insp.get("replaceable_pdfs", [])]
+        self.assertEqual(rep_names, ["01_00_00_00_00_00_0000_0002_00.pdf"])
+        self.assertNotIn("REG_12.pdf", rep_names)
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_totally_blank.db")
+        diag = service.process_folder(str(f_test), save_to_db=True)
+        self.assertTrue(diag["needs_apartar"])
+        self.assertTrue(diag["needs_page_replacement"])
+
+        # Ejecutar corrección
+        service.execute_all_pending_corrections(diag)
+
+        # PDF 2 ahora debe tener 2 páginas (hoja blanca insertada al inicio)
+        doc2_chk = fitz.open(str(f_test / "01_00_00_00_00_00_0000_0002_00.pdf"))
+        self.assertEqual(len(doc2_chk), 2)
+        doc2_chk.close()
+
+        # REG_12.pdf sigue con 1 sola página intacta
+        doc_reg_chk = fitz.open(str(f_test / "REG_12.pdf"))
+        self.assertEqual(len(doc_reg_chk), 1)
+        doc_reg_chk.close()
+
+    def test_16_dup_renamed_reg_intact_and_routes_to_apartados(self):
+        """
+        Verifica que en carpetas con DUP y REG:
+        - Los PDFs regulares y DUP se renombran con el código base limpio.
+        - Los DUP preservan su sufijo _DUP.
+        - Los archivos REG quedan 100% intactos con su nombre original.
+        - La carpeta se clasifica para apartados.
+        """
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1994_TEMP"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        caratula_text = "CARATULA LIBRO 1 SECCION 3 1994"
+        self._create_dummy_pdf(f_test / "01_00_00_00_00_00_0000_CARATULA_00.pdf", text=caratula_text)
+
+        doc_reg = fitz.open()
+        p1 = doc_reg.new_page(width=300, height=300)
+        p1.insert_text((50, 50), caratula_text)
+        p2 = doc_reg.new_page(width=300, height=300)
+        p2.insert_text((50, 50), "REGISTRO REGULAR")
+        doc_reg.save(str(f_test / "01_00_00_00_00_00_0000_0001_00.pdf"))
+        doc_reg.close()
+
+        doc_dup = fitz.open()
+        p1 = doc_dup.new_page(width=300, height=300)
+        p1.insert_text((50, 50), caratula_text)
+        p2 = doc_dup.new_page(width=300, height=300)
+        p2.insert_text((50, 50), "REGISTRO DUP")
+        doc_dup.save(str(f_test / "01_00_00_00_00_00_0000_0002_00_DUP.pdf"))
+        doc_dup.close()
+
+        self._create_dummy_pdf(f_test / "REG_-60.pdf", text="REG DOCUMENT")
+
+        mock_parsed = {
+            "seccion": 3, "libro": 1, "tomo": None, "volumen": None, "fraccionamiento": None, "anio": 1994,
+            "es_auxiliar": False, "texto_descriptivo": "Acta Libro 1 Seccion 3 1994", "evidencias": ["L1 S3 1994"]
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_dup_reg.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertEqual(diag["codigo_base_sugerido"], "01_03_01_00_00_00_1994")
+        self.assertTrue(diag["needs_apartar"])
+        self.assertEqual(diag["subcarpeta_revision"], "ARCHIVOS CON DUP Y REG")
+
+        # Aplicar correcciones físicas
+        corr_res = service.execute_all_pending_corrections(diag)
+        self.assertTrue(corr_res["success"])
+
+        new_folder = Path(diag["folder_path"])
+        self.assertTrue((new_folder / "01_03_01_00_00_00_1994_0001_00.pdf").exists())
+        self.assertTrue((new_folder / "01_03_01_00_00_00_1994_0002_00_DUP.pdf").exists())
+        # Archivo REG debe existir exactamente con su nombre original
+        self.assertTrue((new_folder / "REG_-60.pdf").exists())
+
+    def test_17_execute_all_pending_corrections_and_full_rollback(self):
+        """
+        Verifica que al mover una carpeta con correcciones a Apartados, se apliquen las correcciones,
+        se mueva a la subcarpeta de error correspondiente, y rollback_all restaure todo al estado inicial.
+        """
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1994_APARTAR"
+        f_test.mkdir(parents=True, exist_ok=True)
+        apartados_root = self.temp_dir / "APARTADOS_DIR"
+        apartados_root.mkdir(parents=True, exist_ok=True)
+
+        c_text2 = "CARATULA LIBRO 2 1994"
+        self._create_dummy_pdf(f_test / "01_00_00_00_00_00_0000_CARATULA_00.pdf", text=c_text2)
+
+        doc_r2 = fitz.open()
+        p1 = doc_r2.new_page(width=300, height=300)
+        p1.insert_text((50, 50), c_text2)
+        p2 = doc_r2.new_page(width=300, height=300)
+        p2.insert_text((50, 50), "REGULAR")
+        doc_r2.save(str(f_test / "01_00_00_00_00_00_0000_0001_00.pdf"))
+        doc_r2.close()
+
+        doc_d2 = fitz.open()
+        p1 = doc_d2.new_page(width=300, height=300)
+        p1.insert_text((50, 50), c_text2)
+        p2 = doc_d2.new_page(width=300, height=300)
+        p2.insert_text((50, 50), "DUP 1")
+        doc_d2.save(str(f_test / "01_00_00_00_00_00_0000_0002_00_DUP1.pdf"))
+        doc_d2.close()
+
+        self._create_dummy_pdf(f_test / "REG_SPEC.pdf", text="REG")
+
+        mock_parsed = {
+            "seccion": 1, "libro": 2, "tomo": None, "volumen": None, "fraccionamiento": None, "anio": 1994,
+            "es_auxiliar": False, "texto_descriptivo": "Acta Libro 2 1994", "evidencias": ["L2 1994"]
+        }
+        mock_usage = {"input_tokens": 800, "cache_read_input_tokens": 0, "model_used": "claude-sonnet-5"}
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_apartar_full.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        # Mover a apartados (debe auto-aplicar correcciones antes de mover)
+        op_res = service.execute_move_to_apartados(diag, str(apartados_root))
+        final_p = Path(op_res["new_folder_path"])
+        self.assertTrue(final_p.exists())
+        self.assertIn("ARCHIVOS CON DUP Y REG", str(final_p))
+
+        # Verificar nombres corregidos
+        self.assertTrue((final_p / "01_01_02_00_00_00_1994_0001_00.pdf").exists())
+        self.assertTrue((final_p / "01_01_02_00_00_00_1994_0002_00_DUP1.pdf").exists())
+        self.assertTrue((final_p / "REG_SPEC.pdf").exists())
+
+        # Probar Rollback Total
+        rb = service.rollback_all()
+        self.assertTrue(rb["success"])
+        self.assertTrue(f_test.exists())
+        self.assertTrue((f_test / "01_00_00_00_00_00_0000_0001_00.pdf").exists())
+        self.assertTrue((f_test / "01_00_00_00_00_00_0000_0002_00_DUP1.pdf").exists())
+        self.assertTrue((f_test / "REG_SPEC.pdf").exists())
 
 
 if __name__ == "__main__":

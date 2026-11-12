@@ -251,7 +251,13 @@ class FileOperations:
                     errors.append(f"No existe: {pdf_file.name}")
                     continue
 
+                from src.core.caratula_inspector import CaratulaInspector
+                # A los archivos REG nunca se les inserta ni reemplaza carátula
+                if CaratulaInspector.is_irregular_reg_pdf_name(pdf_file.name):
+                    continue
+
                 blank_idx = int(item.get("blank_page_index", 0))
+                action = item.get("action", "REPLACE")
 
                 try:
                     orig_hash = cls.compute_sha256(pdf_file)
@@ -264,11 +270,20 @@ class FileOperations:
                             shutil.copy2(str(pdf_file), str(backup_file))
                         backup_path_str = str(backup_file.resolve())
 
-                    # Modificar el PDF reemplazando la hoja en blanco por la hoja con información de la carátula
+                    # Modificar el PDF reemplazando o insertando la hoja de carátula
                     tmp_file = pdf_file.with_suffix(".tmp_replace.pdf")
                     target_doc = fitz.open(str(pdf_file))
                     try:
-                        if 0 <= blank_idx < len(target_doc):
+                        if action == "INSERT" or blank_idx < 0:
+                            # Insertar carátula al inicio
+                            target_doc.insert_pdf(
+                                caratula_doc,
+                                from_page=src_page_idx,
+                                to_page=src_page_idx,
+                                start_at=0,
+                            )
+                        elif 0 <= blank_idx < len(target_doc):
+                            # Reemplazar la página en blanco por la página de carátula
                             target_doc.delete_page(blank_idx)
                             target_doc.insert_pdf(
                                 caratula_doc,
@@ -326,6 +341,85 @@ class FileOperations:
         }
 
     @classmethod
+    def create_caratula_from_pdf_page(
+        cls,
+        folder_path: Any,
+        source_pdf_path: Any,
+        page_num: int = 1,
+        target_caratula_name: Optional[str] = None,
+        db_manager: Optional[DatabaseManager] = None,
+        mysql_manager: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extrae la página 'page_num' (1-indexed) de 'source_pdf_path' y genera un nuevo
+        archivo PDF independiente de Carátula ('target_caratula_name') en 'folder_path'.
+        Registra la creación en SQLite y MySQL para trazabilidad y Rollback completo.
+        """
+        folder = Path(folder_path)
+        source = Path(source_pdf_path)
+        if not source.exists():
+            raise FileNotFoundError(f"No se encontró el archivo origen para extraer carátula: {source}")
+
+        if not target_caratula_name:
+            target_caratula_name = f"{folder.name}_CARATULA_00.pdf"
+
+        target_file = folder / target_caratula_name
+        if target_file.exists():
+            return {
+                "created": False,
+                "caratula_path": str(target_file),
+                "caratula_filename": target_file.name,
+                "message": "El archivo de carátula ya existía.",
+            }
+
+        src_idx = max(0, int(page_num) - 1)
+        src_doc = fitz.open(str(source))
+        new_doc = fitz.open()
+        try:
+            if src_idx >= len(src_doc):
+                raise ValueError(f"La página {page_num} excede el total de páginas de {source.name} ({len(src_doc)})")
+            new_doc.insert_pdf(src_doc, from_page=src_idx, to_page=src_idx)
+            new_doc.save(str(target_file))
+        finally:
+            new_doc.close()
+            src_doc.close()
+
+        caratula_hash = cls.compute_sha256(target_file)
+
+        if db_manager is not None:
+            db_manager.log_file_movement(
+                tipo_movimiento="CREACION_CARATULA_EMBEBIDA",
+                ruta_anterior=str(target_file),
+                ruta_nueva=str(target_file),
+                nombre_anterior=target_caratula_name,
+                nombre_nuevo=target_caratula_name,
+                hash_actual=caratula_hash,
+                numero_paginas=1,
+                hash_origen_inicial="__NUEVO_ARCHIVO_CREADO__",
+                backup_contenido_path=None,
+            )
+
+        if mysql_manager and getattr(mysql_manager, "enabled", False):
+            mysql_manager.registrar_movimiento_archivo(
+                tipo_movimiento="CREACION_CARATULA_EMBEBIDA",
+                ruta_origen=str(source),
+                ruta_destino=str(target_file),
+                nombre_origen=source.name,
+                nombre_destino=target_caratula_name,
+                hash_sha256=caratula_hash,
+                numero_paginas=1,
+                motivo=f"Extracción de Carátula Embebida desde pág. {page_num} de {source.name}",
+            )
+
+        return {
+            "created": True,
+            "caratula_path": str(target_file),
+            "caratula_filename": target_file.name,
+            "hash": caratula_hash,
+            "pages": 1,
+        }
+
+    @classmethod
     def rename_folder_and_internal_pdfs(
         cls,
         folder_path: Any,
@@ -362,6 +456,20 @@ class FileOperations:
         for pdf in pdf_files:
             old_abs_path = pdf.resolve()
             old_name = pdf.name
+
+            # Si es un archivo irregular tipo REG (ej. REG_-60.pdf, REG 60.pdf):
+            # NO se renombra; queda 100% intacto con su nombre original.
+            from src.core.caratula_inspector import CaratulaInspector
+            if CaratulaInspector.is_irregular_reg_pdf_name(old_name):
+                file_tracking.append({
+                    "old_abs_path": old_abs_path,
+                    "old_name": old_name,
+                    "new_name": old_name,
+                    "temp_path_in_folder": old_abs_path,
+                    "is_reg": True,
+                })
+                continue
+
             new_pdf_name = cls.build_new_pdf_name(old_name, clean_base_code, old_folder_name)
 
             # Evitar colisión interna si dos PDFs generaran el mismo nombre
@@ -610,6 +718,21 @@ class FileOperations:
         curr_dir = curr_path.parent
 
         try:
+            # 0. Si el archivo fue generado nuevo durante el proceso (ej. carátula embebida extraída)
+            if candidate.get("hash_origen_inicial") == "__NUEVO_ARCHIVO_CREADO__":
+                if curr_path.exists():
+                    try:
+                        os.remove(str(curr_path))
+                    except Exception:
+                        pass
+                if init_path.exists() and init_path.resolve() != curr_path.resolve():
+                    try:
+                        os.remove(str(init_path))
+                    except Exception:
+                        pass
+                db_manager.mark_file_reverted(init_path)
+                return True, f"Eliminado archivo generado: {curr_path.name}"
+
             # 1. Si existe un respaldo binario (por reemplazo de hoja en blanco), restaurar esos bytes exactos
             if backup_path is not None and backup_path.exists():
                 shutil.copy2(str(backup_path), str(init_path))
@@ -706,6 +829,7 @@ class FileOperations:
             "restored_count": restored,
             "errors": errors,
             "details": details,
+            "success": len(errors) == 0,
         }
 
     @classmethod
@@ -733,4 +857,5 @@ class FileOperations:
             "total_candidates": len(candidates),
             "restored_count": restored,
             "errors": errors,
+            "success": len(errors) == 0,
         }

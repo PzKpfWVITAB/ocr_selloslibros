@@ -212,12 +212,12 @@ class CaratulaInspector:
             doc.close()
 
         # Si ninguna página superó el umbral absoluto pero hay al menos 2 páginas y una tiene
-        # claramente mucha mayor densidad de trazos que la otra, tomarla como página con info
+        # claramente mayor densidad de trazos que la otra, tomarla como página con info
         if not info_pages and len(pages_info) >= 2:
             sorted_by_score = sorted(pages_info, key=lambda x: x["text_score"], reverse=True)
             best = sorted_by_score[0]
             second = sorted_by_score[1]
-            if best["text_score"] >= 0.0045 and best["text_score"] >= (second["text_score"] * 1.75):
+            if best["text_score"] >= 0.001 and best["text_score"] > (second["text_score"] * 1.15):
                 best["has_text"] = True
                 info_pages = [best["page_num"]]
                 blank_pages = [p["page_num"] for p in pages_info if p["page_num"] != best["page_num"]]
@@ -235,6 +235,8 @@ class CaratulaInspector:
             else:
                 text_pages_objs.sort(key=lambda x: x["text_score"], reverse=True)
                 primary_info_page = text_pages_objs[0]["page_num"]
+        elif pages_info:
+            primary_info_page = 1
 
         return {
             "caratula_path": str(caratula_path),
@@ -270,11 +272,14 @@ class CaratulaInspector:
         if not allow_dhash_for_text:
             return None
 
-        gray = cls._render_page_gray(page, dpi=100)
+        page_has_text, _, gray = cls.analyze_page_has_text(page, dpi=100)
         page_dhash = cls._compute_dhash(gray)
         best_match = None
         best_dist = 9999
         for c_page in caratula_pages:
+            # Una página con texto útil no debe coincidir con una página en blanco de carátula por dHash
+            if page_has_text != c_page.get("has_text", False):
+                continue
             dist = cls._hamming_distance(page_dhash, c_page["dhash"])
             if dist < best_dist:
                 best_dist = dist
@@ -369,6 +374,76 @@ class CaratulaInspector:
             return {"kind": "MISSING", "pdf_file": pdf_file, "page_count": page_cnt}
 
     @classmethod
+    def detect_embedded_caratula_sample(
+        cls,
+        regular_pdfs: List[Path],
+        sample_count: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Verifica si los primeros archivos (muestra de hasta 'sample_count', típicamente 3)
+        comparten exactamente la misma página 1 como carátula embebida y dicha página
+        contiene texto/sellos reales (no está en blanco).
+        """
+        if not regular_pdfs:
+            return None
+
+        clean_pdfs = [
+            f for f in regular_pdfs
+            if not cls.is_duplicate_pdf_name(f.name) and not cls.is_irregular_reg_pdf_name(f.name)
+        ]
+        target_list = clean_pdfs if clean_pdfs else regular_pdfs
+        needed = min(sample_count, len(target_list))
+        sample = target_list[:needed]
+        if not sample:
+            return None
+
+        pages_data = []
+        for pf in sample:
+            try:
+                doc = fitz.open(str(pf))
+            except Exception:
+                return None
+            try:
+                if len(doc) == 0:
+                    return None
+                p0 = doc[0]
+                has_text, score, gray = cls.analyze_page_has_text(p0, dpi=100)
+                if not has_text:
+                    # Si la primera página está en blanco, no es una carátula válida
+                    return None
+                md5s, raw_sigs = cls._extract_page_image_signatures(doc, p0)
+                dhash = cls._compute_dhash(gray)
+                pages_data.append({
+                    "pdf": pf,
+                    "score": score,
+                    "md5s": md5s,
+                    "raw_sigs": raw_sigs,
+                    "dhash": dhash,
+                })
+            finally:
+                doc.close()
+
+        if len(pages_data) < len(sample):
+            return None
+
+        # Si hay más de 1 archivo en la muestra, verificar que todos coincidan con el primero
+        first = pages_data[0]
+        for other in pages_data[1:]:
+            same_stream = any(m in other["md5s"] for m in first["md5s"] if m)
+            dist = cls._hamming_distance(first["dhash"], other["dhash"])
+            # Coinciden si comparten stream MD5 o si la distancia Hamming dHash es <= 10
+            if not same_stream and dist > 10:
+                return None
+
+        return {
+            "source_pdf": first["pdf"],
+            "source_pdf_name": first["pdf"].name,
+            "page_num": 1,
+            "sample_verified_count": len(pages_data),
+            "total_regular_pdfs": len(regular_pdfs),
+        }
+
+    @classmethod
     def inspect_folder(
         cls,
         folder_path: Any,
@@ -391,20 +466,54 @@ class CaratulaInspector:
             caratula_pdf = cls.auto_detect_caratula(folder)
 
         if caratula_pdf is None:
+            # Intentar detectar carátula embebida en la primera página de los archivos regulares
+            embedded_caratula = cls.detect_embedded_caratula_sample(all_pdfs, sample_count=3)
+            if embedded_caratula is not None:
+                return {
+                    "status": "CARATULA_EMBEBIDA_CANDIDATA",
+                    "caratula_path": str(embedded_caratula["source_pdf"]),
+                    "caratula_filename": f"[EMBEBIDA] {embedded_caratula['source_pdf_name']} (Pág. 1)",
+                    "info_page_num": 1,
+                    "info_pages": [1],
+                    "blank_pages": [],
+                    "caratula_total_pages": 1,
+                    "all_pdfs_have_caratula": True,
+                    "total_regular_pdfs": len(all_pdfs),
+                    "total_pages_in_folder": len(all_pdfs),
+                    "pdf_page_counts": {f.name: 1 for f in all_pdfs},
+                    "pdfs_with_info_page": len(all_pdfs),
+                    "pdfs_with_blank_page": 0,
+                    "pdfs_missing_caratula": [],
+                    "replaceable_pdfs": [],
+                    "dup_pdfs": dup_pdfs,
+                    "irregular_pdfs": irregular_pdfs,
+                    "embedded_caratula_info": embedded_caratula,
+                    "summary_message": (
+                        f"Sin archivo de carátula independiente, pero se detectó la misma Página 1 en "
+                        f"muestra de {embedded_caratula['sample_verified_count']} archivos "
+                        f"('{embedded_caratula['source_pdf_name']}'). Candidata a carátula para análisis OCR."
+                    ),
+                }
+
             return {
                 "status": "SIN_ARCHIVO_CARATULA",
                 "caratula_path": None,
                 "caratula_filename": None,
                 "info_page_num": None,
+                "info_pages": [],
+                "blank_pages": [],
+                "caratula_total_pages": 0,
                 "all_pdfs_have_caratula": False,
                 "total_regular_pdfs": len(all_pdfs),
+                "total_pages_in_folder": len(all_pdfs),
+                "pdf_page_counts": {f.name: 1 for f in all_pdfs},
                 "pdfs_with_info_page": 0,
                 "pdfs_with_blank_page": 0,
                 "pdfs_missing_caratula": [f.name for f in all_pdfs],
                 "replaceable_pdfs": [],
                 "dup_pdfs": dup_pdfs,
                 "irregular_pdfs": irregular_pdfs,
-                "summary_message": "No se encontró un archivo PDF con 'CARATULA' en la carpeta.",
+                "summary_message": "No se encontró un archivo PDF con 'CARATULA' ni carátula embebida en la carpeta.",
             }
 
         c_info = cls.inspect_caratula_pdf(caratula_pdf)
@@ -416,27 +525,6 @@ class CaratulaInspector:
             f for f in all_pdfs
             if f.resolve() != caratula_pdf.resolve()
         ]
-
-        if c_info["all_pages_blank"]:
-            return {
-                "status": "TOTALMENTE_BLANCA",
-                "caratula_path": str(caratula_pdf),
-                "caratula_filename": caratula_pdf.name,
-                "caratula_total_pages": c_info["total_pages"],
-                "info_page_num": None,
-                "all_pdfs_have_caratula": True,
-                "total_regular_pdfs": len(regular_pdfs),
-                "pdfs_with_info_page": 0,
-                "pdfs_with_blank_page": len(regular_pdfs),
-                "pdfs_missing_caratula": [],
-                "replaceable_pdfs": [],
-                "dup_pdfs": dup_pdfs,
-                "irregular_pdfs": irregular_pdfs,
-                "summary_message": (
-                    f"Todas las páginas ({c_info['total_pages']}) de '{caratula_pdf.name}' están en blanco. "
-                    "Debe enviarse al directorio de Apartados (0 tokens consumidos)."
-                ),
-            }
 
         pdfs_with_info_page = 0
         pdfs_with_blank_page = 0
@@ -467,21 +555,48 @@ class CaratulaInspector:
                     total_pages_in_folder += p_cnt
                     pdf_page_counts[pf.name] = p_cnt
 
+                    is_reg = cls.is_irregular_reg_pdf_name(pf.name)
+
                     if kind == "INFO":
                         pdfs_with_info_page += 1
                     elif kind == "BLANK":
                         pdfs_with_blank_page += 1
-                        replaceable_pdfs.append({
-                            "pdf_path": str(pf),
-                            "pdf_name": pf.name,
-                            "blank_page_index": int(res_item.get("blank_page_index", 0)),
-                        })
+                        # Si la carátula tiene alguna página con texto (primary_info_page) y no es 100% en blanco,
+                        # reemplazar la hoja en blanco en los PDFs regulares y DUP (nunca en REG)
+                        if not is_reg and primary_info_page is not None and not c_info.get("all_pages_blank", False):
+                            replaceable_pdfs.append({
+                                "pdf_path": str(pf),
+                                "pdf_name": pf.name,
+                                "action": "REPLACE",
+                                "blank_page_index": int(res_item.get("blank_page_index", 0)),
+                            })
                     else:
-                        pdfs_missing_caratula.append(pf.name)
+                        # Si a un PDF le falta la carátula y NO es REG, registrarlo para inserción al inicio.
+                        # (A los archivos REG nunca se les inserta carátula ni se marcan como faltantes)
+                        if not is_reg:
+                            pdfs_missing_caratula.append(pf.name)
+                            replaceable_pdfs.append({
+                                "pdf_path": str(pf),
+                                "pdf_name": pf.name,
+                                "action": "INSERT",
+                                "blank_page_index": -1,
+                            })
 
         all_have_caratula = len(pdfs_missing_caratula) == 0
 
-        if pdfs_missing_caratula:
+        if c_info.get("all_pages_blank", False):
+            status = "TOTALMENTE_BLANCA"
+            if replaceable_pdfs:
+                msg = (
+                    f"La carátula '{caratula_pdf.name}' está 100% en blanco. Se asegurará la inserción de la "
+                    f"hoja en blanco en {len(replaceable_pdfs)} PDF(s) que carecían de ella (archivos REG intactos)."
+                )
+            else:
+                msg = (
+                    f"Todas las páginas ({c_info['total_pages']}) de '{caratula_pdf.name}' están en blanco. "
+                    "Todos los PDFs ya contienen la hoja en blanco (0 tokens consumidos)."
+                )
+        elif pdfs_missing_caratula:
             status = "PDFS_SIN_CARATULA"
             msg = (
                 f"{len(pdfs_missing_caratula)} de {len(regular_pdfs)} PDFs NO contienen ninguna página "
@@ -491,8 +606,8 @@ class CaratulaInspector:
             status = "REEMPLAZABLE_HOJA_BLANCA"
             msg = (
                 f"{pdfs_with_blank_page} PDFs tienen adjunta la hoja en blanco de la carátula, "
-                f"pero la página {primary_info_page} de '{caratula_pdf.name}' sí tiene la información "
-                "y puede reemplazarla automáticamente."
+                f"pero la página {primary_info_page} de '{caratula_pdf.name}' sí tiene información/texto "
+                "y puede reemplazarla automáticamente (archivos REG intactos)."
             )
         else:
             status = "OK_CON_INFO"

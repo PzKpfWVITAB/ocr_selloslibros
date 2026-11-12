@@ -2401,6 +2401,13 @@ class OCRLibrosApp(tk.Tk):
 
         ttk.Button(
             row_act1,
+            text="⚡ Aplicar Todo a esta Carpeta",
+            style="Primary.TButton",
+            command=self.apply_all_single_folder
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act1,
             text="📝 Editar Campos...",
             command=self.open_manual_edit_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -2439,6 +2446,13 @@ class OCRLibrosApp(tk.Tk):
             font=("Segoe UI", 9, "bold"),
             foreground="#334155"
         ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            row_act2,
+            text="⚡ Aplicar TODAS las Correcciones Físicas (Hojas + Renombres)",
+            style="Primary.TButton",
+            command=self.batch_apply_all_corrections
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Button(
             row_act2,
@@ -3037,7 +3051,14 @@ class OCRLibrosApp(tk.Tk):
             applied_actions = res.get("applied_actions", [])
 
             folder_name = f_data.get("folder_name") or Path(res.get("folder_path", "")).name
-            caratula_name = insp.get("caratula_filename") or "SIN CARÁTULA"
+            caratula_name = insp.get("caratula_filename")
+            if not caratula_name:
+                if c_status == "CARATULA_EMBEBIDA_VALIDA" or res.get("embedded_caratula_to_create"):
+                    caratula_name = "(Auto-generar de Pág. 1)"
+                elif insp.get("embedded_caratula_info"):
+                    caratula_name = "(Pág. 1 compartida no válida)"
+                else:
+                    caratula_name = "SIN CARÁTULA"
 
             if c_status == "OK_CON_INFO":
                 info_pgs = insp.get("info_pages", [])
@@ -3046,6 +3067,10 @@ class OCRLibrosApp(tk.Tk):
                     estado_hojas = f"✔ OK (Págs. {pgs_str} c/info)"
                 else:
                     estado_hojas = f"✔ OK (Pág. {insp.get('info_page_num', 1)} c/info)"
+            elif c_status == "CARATULA_EMBEBIDA_VALIDA":
+                estado_hojas = "✔ Embebida (Pág.1 compartida)"
+            elif c_status == "CARATULA_EMBEBIDA_CANDIDATA":
+                estado_hojas = "🔍 Embebida (Pág.1 candidata)"
             elif c_status == "REEMPLAZABLE_HOJA_BLANCA":
                 estado_hojas = f"🛠 {insp.get('pdfs_with_blank_page', 0)} PDFs c/Hoja Blanca (Info Pág. {insp.get('info_page_num')})"
             elif c_status == "TOTALMENTE_BLANCA":
@@ -3053,7 +3078,10 @@ class OCRLibrosApp(tk.Tk):
             elif c_status == "PDFS_SIN_CARATULA":
                 estado_hojas = f"⚠ {len(insp.get('pdfs_missing_caratula', []))} PDFs sin Carátula"
             elif c_status == "SIN_ARCHIVO_CARATULA":
-                estado_hojas = "✖ Sin PDF Carátula"
+                if insp.get("embedded_caratula_info"):
+                    estado_hojas = "✖ Sin Carátula (Pág.1 sin datos)"
+                else:
+                    estado_hojas = "✖ Sin PDF Carátula"
             else:
                 estado_hojas = "⏳ Pre-cargada"
 
@@ -3123,6 +3151,15 @@ class OCRLibrosApp(tk.Tk):
             else:
                 tag = "diff"
                 v_label = f"✖ {v_global}"
+
+            if applied_actions and v_global in (
+                "REVISION_ARCHIVOS_DUP",
+                "REVISION_ARCHIVOS_REG",
+                "REVISION_DUP_Y_REG",
+                "SIN_INFO_LIMPIAR_NOMBRE",
+                "APARTAR_CARATULA_BLANCA"
+            ):
+                v_label += " (CORREGIDA)"
 
             row_vals = (
                 idx,
@@ -3740,6 +3777,45 @@ class OCRLibrosApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Error al renombrar", str(exc))
 
+    def apply_all_single_folder(self):
+        res = self._get_selected_result()
+        if not res:
+            messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla.")
+            return
+
+        if not res.get("needs_page_replacement") and not res.get("needs_rename"):
+            messagebox.showinfo(
+                "Sin Correcciones Pendientes",
+                "Esta carpeta no tiene correcciones físicas pendientes (hojas o renombrado)."
+            )
+            return
+
+        folder_name = Path(res.get("folder_path", "")).name
+        if not messagebox.askyesno(
+            "Confirmar Corrección Integral de Carpeta",
+            f"Se aplicarán todas las correcciones físicas pendientes a la carpeta:\n'{folder_name}'\n\n"
+            "• Inserción/reemplazo de carátulas en PDFs regulares y DUP (archivos REG intactos).\n"
+            "• Extracción de carátula embebida si aplica.\n"
+            "• Renombrado de carpeta y PDFs (DUP preservados, REG intactos).\n\n"
+            "¿Deseas continuar?"
+        ):
+            return
+
+        try:
+            op = self.service.execute_all_pending_corrections(res)
+            self._refresh_master_table()
+            self._render_single_folder_detail(res)
+            self._refresh_header_badge()
+            actions_str = "\n".join(f"  • {a}" for a in op.get("applied_actions", [])) or "Sin acciones adicionales."
+            messagebox.showinfo(
+                "Correcciones Aplicadas",
+                f"Se corrigió la carpeta con éxito.\n"
+                f"Archivos físicos modificados / renombrados: {op.get('modified_count', 0)}\n\n"
+                f"Detalle:\n{actions_str}"
+            )
+        except Exception as exc:
+            messagebox.showerror("Error al aplicar correcciones", str(exc))
+
     def apartar_selected_folder(self):
         res = self._get_selected_result()
         if not res:
@@ -3823,6 +3899,51 @@ class OCRLibrosApp(tk.Tk):
     # =========================================================================
     # OPERACIONES EN LOTE (FASE 2)
     # =========================================================================
+
+    def batch_apply_all_corrections(self):
+        targets = [
+            r for r in self.all_folder_items
+            if r.get("needs_page_replacement", False) or r.get("needs_rename", False)
+        ]
+        if not targets:
+            messagebox.showinfo(
+                "Sin Correcciones Pendientes",
+                "No hay carpetas con correcciones físicas pendientes (hojas o renombres)."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Aplicación Masiva de Correcciones",
+            f"Se aplicarán en disco todas las correcciones físicas pendientes en {len(targets)} carpeta(s):\n\n"
+            "  • Inserción o reemplazo de carátulas en PDFs regulares y DUP (archivos REG intactos).\n"
+            "  • Extracción y creación física de carátulas embebidas si aplica.\n"
+            "  • Renombrado de carpetas y PDFs (DUP preservados, REG intactos).\n\n"
+            "Todos los cambios quedarán respaldados en SQLite con soporte de Rollback total.\n"
+            "Las carpetas permanecerán en su ubicación para que puedas revisarlas en la tabla antes de trasladarlas.\n\n"
+            "¿Deseas continuar?"
+        ):
+            return
+
+        corrected_folders = 0
+        total_files = 0
+        errors: List[str] = []
+
+        for r in targets:
+            try:
+                op = self.service.execute_all_pending_corrections(r)
+                corrected_folders += 1
+                total_files += op.get("modified_count", 0)
+            except Exception as exc:
+                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
+
+        self._refresh_master_table()
+        self._refresh_header_badge()
+        messagebox.showinfo(
+            "Correcciones Físicas Finalizadas",
+            f"Carpetas procesadas: {corrected_folders}\n"
+            f"Archivos físicos modificados / renombrados: {total_files}\n"
+            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+        )
 
     def batch_replace_all_blank_pages(self):
         targets = [r for r in self.all_folder_items if r.get("needs_page_replacement", False)]
