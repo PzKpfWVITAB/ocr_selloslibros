@@ -307,6 +307,85 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertTrue(f_test.exists())
         self.assertTrue((f_test / "REG_-60.pdf").exists())
 
+    def test_10_multipage_caratula_reads_page2_and_avoids_false_sin_datos(self):
+        """
+        Verifica que en carátulas de múltiples páginas (donde la página 1 es la portada comercial
+        y la página 2 es el Acta de Apertura oficial):
+        1. CaratulaInspector identifique ambas páginas y priorice la pág. 2 con el acta.
+        2. FolderOCRService analice ambas páginas de la carátula sin declararla falsamente como 'SIN DATOS'.
+        3. Se extraiga correctamente Sección 3, Libro 1, Año 1994 y sugiera el renombrado a 01_03_01_00_00_00_1994.
+        """
+        import pymupdf as fitz
+        from unittest.mock import patch
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.service import FolderOCRService
+
+        f_test = self.temp_dir / "01_00_00_00_00_00_1994_5"
+        f_test.mkdir(parents=True, exist_ok=True)
+
+        caratula_pdf = f_test / "01_00_00_00_00_00_0000_CARATULA_00.pdf"
+        doc = fitz.open()
+        # Página 1: Portada comercial
+        p1 = doc.new_page(width=612, height=792)
+        p1.insert_text((72, 100), "LIBRO FLORETE ACTAS 240 HOJAS", fontsize=18)
+        p1.insert_text((72, 700), "TALLERES ESTRELLA S.A. DE C.V. TOLUCA MEXICO", fontsize=12)
+
+        # Página 2: Acta de Apertura oficial
+        p2 = doc.new_page(width=612, height=792)
+        p2.insert_text(
+            (72, 120),
+            "EL SUSCRITO SECRETARIO DE GOBIERNO DEL ESTADO DE CHIAPAS AUTORIZA EL PRESENTE "
+            "LIBRO NUMERO 1 UNO PARA LLEVAR EL DUPLICADO DE LA SECCION TERCERA DEL REGISTRO "
+            "PUBLICO DE LA PROPIEDAD Y DE COMERCIO PARA EL AÑO DE 1994",
+            fontsize=12
+        )
+        doc.save(str(caratula_pdf))
+        doc.close()
+
+        # Crear archivos regulares de prueba con página 1 de carátula
+        self._create_dummy_pdf(
+            f_test / "01_00_00_00_00_00_0000_0001_00.pdf",
+            text="INSCRIPCION REGISTRAL REGULAR DE PRUEBA EN LIBRO"
+        )
+
+        insp = CaratulaInspector.inspect_folder(f_test)
+        self.assertEqual(insp["caratula_total_pages"], 2)
+        self.assertEqual(insp["info_pages"], [1, 2])
+        self.assertEqual(insp["info_page_num"], 2)
+
+        # Mock de ClaudeVisionEngine para simular la lectura de ambas páginas
+        mock_parsed = {
+            "seccion": 3,
+            "libro": 1,
+            "tomo": None,
+            "volumen": None,
+            "fraccionamiento": None,
+            "anio": 1994,
+            "es_auxiliar": False,
+            "texto_descriptivo": "Acta de apertura Libro 1 Duplicado Sección 3 Año 1994",
+            "evidencias": [
+                "'LIBRO NUMERO 1 UNO' -> libro=1",
+                "'SECCION TERCERA' -> seccion=3",
+                "'AÑO DE 1994' -> anio=1994"
+            ]
+        }
+        mock_usage = {
+            "input_tokens": 1200,
+            "cache_read_input_tokens": 0,
+            "model_used": "claude-sonnet-5"
+        }
+
+        service = FolderOCRService(db_path=self.temp_dir / "test_multipage.db")
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_parsed, mock_usage)):
+            diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertFalse(diag["needs_apartar"])
+        self.assertEqual(diag["veredicto_global"], "RELLENO_DE_CEROS_PROPUESTO")
+        self.assertEqual(diag["codigo_base_sugerido"], "01_03_01_00_00_00_1994")
+        self.assertEqual(int(diag["ocr_consolidado"]["seccion"]), 3)
+        self.assertEqual(int(diag["ocr_consolidado"]["libro"]), 1)
+        self.assertEqual(int(diag["ocr_consolidado"]["anio"]), 1994)
+
 
 if __name__ == "__main__":
     unittest.main()

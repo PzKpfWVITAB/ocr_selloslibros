@@ -225,8 +225,16 @@ class CaratulaInspector:
         primary_info_page: Optional[int] = None
         if info_pages:
             text_pages_objs = [p for p in pages_info if p["has_text"]]
-            text_pages_objs.sort(key=lambda x: x["text_score"], reverse=True)
-            primary_info_page = text_pages_objs[0]["page_num"]
+            # Si hay 2 páginas y ambas tienen contenido de texto/trazos:
+            # En la estructura física de libros registrales de Chiapas, la página 1 es típicamente
+            # la portada o guarda comercial exterior ("ESTRELLA", "LIBRO FLORETE"), mientras que la
+            # página 2 es la primera foja útil que contiene el Acta de Apertura mecanografiada oficial.
+            # Por ello, si ambas páginas tienen contenido, se prioriza la página 2 como página principal de información.
+            if len(pages_info) == 2 and 1 in info_pages and 2 in info_pages:
+                primary_info_page = 2
+            else:
+                text_pages_objs.sort(key=lambda x: x["text_score"], reverse=True)
+                primary_info_page = text_pages_objs[0]["page_num"]
 
         return {
             "caratula_path": str(caratula_path),
@@ -488,10 +496,17 @@ class CaratulaInspector:
             )
         else:
             status = "OK_CON_INFO"
-            msg = (
-                f"Todos los {len(regular_pdfs)} PDFs contienen la página con información "
-                f"(Pág. {primary_info_page}) de '{caratula_pdf.name}'."
-            )
+            if len(c_info.get("info_pages", [])) > 1:
+                info_pgs_str = ", ".join(str(p) for p in c_info["info_pages"])
+                msg = (
+                    f"Todos los {len(regular_pdfs)} PDFs contienen la carátula '{caratula_pdf.name}'. "
+                    f"La carátula tiene {c_info['total_pages']} páginas (Págs. {info_pgs_str} con contenido para OCR)."
+                )
+            else:
+                msg = (
+                    f"Todos los {len(regular_pdfs)} PDFs contienen la página con información "
+                    f"(Pág. {primary_info_page}) de '{caratula_pdf.name}'."
+                )
 
         return {
             "status": status,
@@ -499,6 +514,9 @@ class CaratulaInspector:
             "caratula_filename": caratula_pdf.name,
             "caratula_total_pages": c_info["total_pages"],
             "info_page_num": primary_info_page,
+            "info_pages": c_info.get("info_pages", [primary_info_page] if primary_info_page else [1]),
+            "blank_pages": c_info.get("blank_pages", []),
+            "caratula_pages": c_info.get("pages", []),
             "all_pdfs_have_caratula": all_have_caratula,
             "total_regular_pdfs": len(regular_pdfs),
             "total_pages_in_folder": total_pages_in_folder,

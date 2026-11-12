@@ -68,3 +68,42 @@ class ImageExtractor:
         finally:
             doc.close()
         return results
+
+    @staticmethod
+    def extract_pages_by_numbers(
+        pdf_path: Path,
+        page_nums: List[int],
+        dpi: int = 200
+    ) -> List[Tuple[int, np.ndarray]]:
+        """
+        Extrae un conjunto ordenado de páginas específicas (1-indexed) del PDF como lista de
+        tuplas (page_num, bgr_numpy).
+        """
+        results: List[Tuple[int, np.ndarray]] = []
+        doc = pymupdf.open(str(pdf_path))
+        try:
+            total_doc_pages = len(doc)
+            seen_pages = set()
+            for p_num in page_nums:
+                p_int = int(p_num)
+                if p_int in seen_pages:
+                    continue
+                seen_pages.add(p_int)
+                idx = p_int - 1
+                if 0 <= idx < total_doc_pages:
+                    page = doc[idx]
+                    pix = page.get_pixmap(dpi=dpi)
+                    img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                    if pix.n == 4:
+                        bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
+                    elif pix.n == 3:
+                        bgr = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
+                    elif pix.n == 1:
+                        bgr = cv2.cvtColor(img_data, cv2.COLOR_GRAY2BGR)
+                    else:
+                        bgr = img_data
+                    results.append((p_int, bgr))
+        finally:
+            doc.close()
+        return results
+

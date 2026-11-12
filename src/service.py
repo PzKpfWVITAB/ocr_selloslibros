@@ -316,9 +316,27 @@ class FolderOCRService:
             return result
 
         # Caso C: Todos los PDFs tienen una página de la Carátula ('OK_CON_INFO' o 'REEMPLAZABLE_HOJA_BLANCA')
-        # -> Analizar en Claude ÚNICAMENTE la página con información de la CARÁTULA (1 sola imagen)
+        # -> Analizar en Claude la página o páginas relevantes de la CARÁTULA
         caratula_pdf_path = Path(caratula_path_str)
-        target_page_num = int(info_page_num or 1)
+        c_total_pages = int(insp.get("caratula_total_pages") or 1)
+        info_pages = list(insp.get("info_pages", []))
+        if not info_pages and (c_pages := insp.get("caratula_pages")):
+            info_pages = [p["page_num"] for p in c_pages if p.get("has_text")]
+
+        # Determinar qué páginas de la carátula analizar:
+        # - Si tiene 1 página: analizar pág. 1.
+        # - Si tiene 2 páginas: analizar AMBAS páginas (pág. 1 suele ser la tapa/guarda comercial
+        #   y pág. 2 suele ser el Acta de Apertura oficial con sellos, o ambas se complementan).
+        # - Si tiene 3 o más páginas: analizar todas las páginas con texto detectado (hasta 3), o las primeras 2.
+        if c_total_pages == 1:
+            target_pages = [1]
+        elif c_total_pages == 2:
+            target_pages = [1, 2]
+        else:
+            if info_pages:
+                target_pages = sorted([p for p in info_pages if 1 <= p <= 3])
+            else:
+                target_pages = [1, 2]
 
         api_key = self.settings.get("api_key", "")
         model = self.settings.get("model", "claude-sonnet-5")
@@ -327,30 +345,41 @@ class FolderOCRService:
         max_dim = int(self.settings.get("image_max_dim", 1400))
         jpeg_quality = int(self.settings.get("jpeg_quality", 82))
 
-        cache_key = f"{self.cache.compute_pdf_key(caratula_pdf_path, max_pages=target_page_num)}_page{target_page_num}"
+        pages_label = ", ".join(str(p) for p in target_pages)
+        pages_suffix = "_".join(str(p) for p in target_pages)
+        cache_key = f"{self.cache.compute_pdf_key(caratula_pdf_path, max_pages=max(target_pages))}_pages_{pages_suffix}"
         cached_doc = self.cache.get(cache_key) if use_local_cache else None
 
+        # Si está en caché pero el documento en caché tenía todos ceros (sin datos)
+        # y la carátula tiene más páginas que las cacheadas, invalidar para reanalizar con Claude
         if cached_doc is not None:
-            # Saneamiento automático en tiempo de ejecución de cualquier entrada en caché
             repaired_doc, changed = ClaudeVisionEngine.sanitize_cached_doc(cached_doc)
             if changed:
                 cached_doc = repaired_doc
                 if use_local_cache:
                     self.cache.set(cache_key, repaired_doc)
 
+            cached_has_info = any(
+                str(cached_doc.get(k, "00")).strip() not in ("00", "0", "0000", "", "None")
+                for k in ("seccion", "libro", "tomo", "volumen", "fraccionamiento", "anio")
+            )
+            if not cached_has_info and c_total_pages > 1 and len(target_pages) < c_total_pages:
+                cached_doc = None
+
+        if cached_doc is not None:
             doc_summary = dict(cached_doc)
             doc_summary["pdf_file"] = caratula_pdf_path.name
             doc_summary["from_cache"] = True
             ev_list = list(doc_summary.get("evidencias", []))
-            ev_list.insert(0, f"⚡ [CACHÉ LOCAL: 0 tokens | Carátula Pág. {target_page_num}]")
+            ev_list.insert(0, f"⚡ [CACHÉ LOCAL: 0 tokens | Carátula Pág(s). {pages_label}]")
             ev_list.insert(1, f"📄 {insp.get('summary_message', '')}")
             doc_summary["evidencias"] = ev_list
-            processed_pages_count = 1
+            processed_pages_count = len(target_pages)
             doc_results["CARATULA"] = doc_summary
         else:
-            pages = ImageExtractor.extract_specific_page(
+            pages = ImageExtractor.extract_pages_by_numbers(
                 caratula_pdf_path,
-                page_num=target_page_num,
+                page_nums=target_pages,
                 dpi=PDF_RENDER_DPI
             )
             processed_pages_count = len(pages)
@@ -375,7 +404,7 @@ class FolderOCRService:
             cache_read = usage.get("cache_read_input_tokens", 0)
             model_used = usage.get("model_used", model)
 
-            parsed_doc["pages_analyzed"] = 1
+            parsed_doc["pages_analyzed"] = len(prepared_pages)
             if use_local_cache:
                 self.cache.set(cache_key, parsed_doc)
 
@@ -385,7 +414,7 @@ class FolderOCRService:
             ev_list = list(doc_summary.get("evidencias", []))
             ev_list.insert(
                 0,
-                f"🤖 [Claude {model_used} | Solo Carátula Pág. {target_page_num} | Input: {in_tok} tok | CacheRead: {cache_read} tok]"
+                f"🤖 [Claude {model_used} | Carátula Pág(s). {pages_label} | Input: {in_tok} tok | CacheRead: {cache_read} tok]"
             )
             ev_list.insert(1, f"📄 {insp.get('summary_message', '')}")
             doc_summary["evidencias"] = ev_list
@@ -400,6 +429,57 @@ class FolderOCRService:
             for k in ("seccion", "libro", "tomo", "volumen", "fraccionamiento", "anio")
         )
 
+        # REINTENTO AUTOMÁTICO (FALLBACK): Si no se encontró información y la carátula tiene páginas adicionales
+        # que no se enviaron inicialmente (ej. si c_total_pages >= 3 y solo se enviaron [1, 2]):
+        if not found_any_ocr_info and c_total_pages > len(target_pages):
+            fallback_pages = [p for p in range(1, min(c_total_pages + 1, 4)) if p not in target_pages]
+            if fallback_pages:
+                fb_pages = ImageExtractor.extract_pages_by_numbers(
+                    caratula_pdf_path,
+                    page_nums=fallback_pages,
+                    dpi=PDF_RENDER_DPI
+                )
+                if fb_pages:
+                    fb_prepared = []
+                    for p_num, img_bgr in fb_pages:
+                        enhanced = self.preprocessor.enhance_faint_text(img_bgr, apply_unsharp=True)
+                        fb_prepared.append((p_num, enhanced))
+
+                    fb_parsed, fb_usage = ClaudeVisionEngine.analyze_document_pages(
+                        pages_bgr=fb_prepared,
+                        api_key=api_key,
+                        model=model,
+                        use_prompt_cache=use_prompt_cache,
+                        max_dim=max_dim,
+                        jpeg_quality=jpeg_quality,
+                        doc_role="CARATULA"
+                    )
+                    self.cache.record_api_usage(fb_usage)
+
+                    fb_has_info = any(
+                        str(fb_parsed.get(k, "00")).strip() not in ("00", "0", "0000", "", "None")
+                        for k in ("seccion", "libro", "tomo", "volumen", "fraccionamiento", "anio")
+                    )
+                    if fb_has_info:
+                        target_pages.extend(fallback_pages)
+                        pages_label = ", ".join(str(p) for p in target_pages)
+                        fb_parsed["pages_analyzed"] = len(prepared_pages) + len(fb_prepared)
+                        doc_summary = dict(fb_parsed)
+                        doc_summary["pdf_file"] = caratula_pdf_path.name
+                        doc_summary["from_cache"] = False
+                        ev_list = list(doc_summary.get("evidencias", []))
+                        fb_in_tok = fb_usage.get("input_tokens", 0)
+                        fb_model = fb_usage.get("model_used", model)
+                        ev_list.insert(
+                            0,
+                            f"🤖 [Claude {fb_model} | Reintento Carátula Pág(s). {','.join(map(str, fallback_pages))} | Input: {fb_in_tok} tok]"
+                        )
+                        doc_summary["evidencias"] = ev_list
+                        doc_results["CARATULA"] = doc_summary
+                        ocr_final = FolderComparator.synthesize_detections(doc_results)
+                        comparison = FolderComparator.compare(folder_data, ocr_final)
+                        found_any_ocr_info = True
+
         if not found_any_ocr_info:
             # Regla solicitada: Si no se encuentra información alguna en la carátula,
             # dejar el nombre de la carpeta tal cual, solo limpiándolo hasta el año
@@ -411,7 +491,7 @@ class FolderOCRService:
             subcarpeta_revision = "CARATULA SIN DATOS"
             needs_apartar = True
             ocr_final["evidencias_globales"].append(
-                f"ℹ Sin información extraíble en carátula: se conserva el nombre actual limpio ('{clean_current_code}') "
+                f"ℹ Sin información extraíble en carátula (revisadas pág(s). {pages_label}): se conserva el nombre actual limpio ('{clean_current_code}') "
                 f"y se clasifica para revisión en subcarpeta '{subcarpeta_revision}'."
             )
         else:

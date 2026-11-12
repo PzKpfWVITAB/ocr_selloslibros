@@ -3040,9 +3040,14 @@ class OCRLibrosApp(tk.Tk):
             caratula_name = insp.get("caratula_filename") or "SIN CARÁTULA"
 
             if c_status == "OK_CON_INFO":
-                estado_hojas = f"✔ OK (Pág.{insp.get('info_page_num', 1)} c/info)"
+                info_pgs = insp.get("info_pages", [])
+                if len(info_pgs) > 1:
+                    pgs_str = ", ".join(str(p) for p in info_pgs)
+                    estado_hojas = f"✔ OK (Págs. {pgs_str} c/info)"
+                else:
+                    estado_hojas = f"✔ OK (Pág. {insp.get('info_page_num', 1)} c/info)"
             elif c_status == "REEMPLAZABLE_HOJA_BLANCA":
-                estado_hojas = f"🛠 {insp.get('pdfs_with_blank_page', 0)} PDFs c/Hoja Blanca (Info Pág.{insp.get('info_page_num')})"
+                estado_hojas = f"🛠 {insp.get('pdfs_with_blank_page', 0)} PDFs c/Hoja Blanca (Info Pág. {insp.get('info_page_num')})"
             elif c_status == "TOTALMENTE_BLANCA":
                 estado_hojas = "⚪ Carátula 100% en Blanco"
             elif c_status == "PDFS_SIN_CARATULA":
