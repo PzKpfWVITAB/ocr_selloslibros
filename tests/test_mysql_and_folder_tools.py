@@ -117,6 +117,45 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertIsInstance(h, str)
         self.assertEqual(len(h), 64)
 
+    def test_06_irregular_files_manual_review_and_three_digit_books(self):
+        """
+        Verifica que:
+        1. Libros con hasta 3 dígitos (ej. 880) sean respetados y no forzados a 2 dígitos.
+        2. Archivos fuera de formato (ej. REG_-60.pdf) no creen carpetas extrañas al separar,
+           permanezcan en la carpeta original y se marquen para revisión manual.
+        """
+        f_test = self.temp_dir / "2003_02_01_00_00_0001-0476"
+        f_test.mkdir()
+
+        # Archivos legítimos del libro 880 (3 dígitos)
+        self._create_dummy_pdf(f_test / "01_02_880_00_00_00_2003_0001_00.pdf")
+        self._create_dummy_pdf(f_test / "01_02_880_00_00_00_2003_0002_00.pdf")
+
+        # Archivo con nombre irregular fuera de estándar
+        self._create_dummy_pdf(f_test / "REG_-60.pdf")
+
+        # Test Renombrador: debe detectar el primer PDF válido (libro 880)
+        renamer = FolderRenamerByFirstPdf()
+        prev_ren = renamer.preview_folder_rename(f_test)
+        self.assertEqual(prev_ren["suggested_name"], "01_02_880_00_00_00_2003")
+        self.assertTrue(prev_ren["needs_rename"])
+
+        # Test Separador: no debe separar REG_-60.pdf en una carpeta 'REG_-60'
+        separator = FolderFileSeparator()
+        insp = separator.inspect_folder_groups(f_test)
+        self.assertFalse(insp["is_mixed"])
+        self.assertEqual(insp["status"], "HOMOGENEA_CON_IRREGULARES")
+        self.assertEqual(insp["total_groups"], 1)
+        self.assertEqual(insp["primary_group"], "01_02_880_00_00_00_2003")
+        self.assertEqual(insp["irregular_files_count"], 1)
+        self.assertEqual(insp["irregular_files"][0]["pdf_name"], "REG_-60.pdf")
+
+        # Intentar ejecutar separación: no debe mover ningún archivo
+        split_res = separator.execute_folder_split(f_test)
+        self.assertFalse(split_res["applied"])
+        self.assertTrue((f_test / "REG_-60.pdf").exists())
+        self.assertFalse((self.temp_dir / "REG_-60").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

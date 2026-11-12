@@ -143,8 +143,26 @@ class FolderRenamerByFirstPdf:
                 "message": "La carpeta no contiene archivos PDF."
             }
 
-        first_pdf = pdfs[0]
-        base_code, detail = self.get_first_pdf_code_up_to_year(first_pdf.name, folder_path.name)
+        # Buscar el primer PDF que cumpla con la estructura de libro válida con año
+        # (omitiendo archivos irregulares como 'REG_-60.pdf' o carátulas sin código)
+        target_pdf = None
+        base_code = None
+        detail = ""
+
+        for p in pdfs:
+            code_cand, det_cand = self.get_first_pdf_code_up_to_year(p.name, folder_path.name)
+            if code_cand:
+                target_pdf = p
+                base_code = code_cand
+                detail = det_cand
+                break
+
+        # Si ninguno cumplió estructura con año, fallback al primer PDF
+        if not target_pdf:
+            target_pdf = pdfs[0]
+            base_code, detail = self.get_first_pdf_code_up_to_year(target_pdf.name, folder_path.name)
+
+        first_pdf = target_pdf
 
         if not base_code:
             return {

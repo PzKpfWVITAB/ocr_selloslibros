@@ -27,6 +27,7 @@ from src.core.file_operations import FileOperations
 from src.database.mysql_manager import MySQLManager
 from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
 from src.core.folder_file_separator import FolderFileSeparator
+from src.core.pdf_selector import PDFSelector
 
 
 class SettingsDialog(tk.Toplevel):
@@ -1754,7 +1755,10 @@ class FolderRenamerDialog(tk.Toplevel):
             self.tree.delete(item)
         self.preview_data.clear()
 
-        subfolders = sorted([f for f in root_path.iterdir() if f.is_dir()])
+        try:
+            subfolders = PDFSelector.get_valid_subfolders(str(root_path))
+        except Exception:
+            subfolders = sorted([f for f in root_path.iterdir() if f.is_dir() and PDFSelector.is_book_folder_name(f.name)])
         total_sub = len(subfolders)
         to_rename_cnt = 0
         already_ok_cnt = 0
@@ -1936,6 +1940,7 @@ class FolderSeparatorDialog(tk.Toplevel):
 
         self.tree_folders.tag_configure("mixed", background="#fff1f2", foreground="#be123c")
         self.tree_folders.tag_configure("clean", background="#f0fdf4", foreground="#15803d")
+        self.tree_folders.tag_configure("review", background="#fffbeb", foreground="#b45309")
         self.tree_folders.tag_configure("done", background="#ecfdf5", foreground="#047857")
 
         scroll1 = ttk.Scrollbar(top_pane, orient=tk.VERTICAL, command=self.tree_folders.yview)
@@ -1985,18 +1990,28 @@ class FolderSeparatorDialog(tk.Toplevel):
         self.inspected_folders.clear()
         self.txt_detail.delete("1.0", tk.END)
 
-        subfolders = sorted([f for f in root_path.iterdir() if f.is_dir()])
+        try:
+            subfolders = PDFSelector.get_valid_subfolders(str(root_path))
+        except Exception:
+            subfolders = sorted([f for f in root_path.iterdir() if f.is_dir() and PDFSelector.is_book_folder_name(f.name)])
         mixed_count = 0
+        review_count = 0
 
         for idx, f_path in enumerate(subfolders, start=1):
             insp = self.separator.preview_folder_split(f_path)
             self.inspected_folders.append(insp)
 
             is_m = insp.get("is_mixed", False)
+            irreg_cnt = insp.get("irregular_files_count", 0)
+
             if is_m:
                 mixed_count += 1
                 tag = "mixed"
                 st = f"⚠ MEZCLADA ({insp.get('total_groups')} libros)"
+            elif irreg_cnt > 0:
+                review_count += 1
+                tag = "review"
+                st = f"ℹ Revisión manual ({irreg_cnt} fuera de formato)"
             else:
                 tag = "clean"
                 st = "✔ Homogénea (1 solo libro)"
@@ -2017,7 +2032,7 @@ class FolderSeparatorDialog(tk.Toplevel):
             )
 
         self.lbl_summary.config(
-            text=f"Total: {len(subfolders)} carpetas  |  {mixed_count} contienen libros/secciones mezclados"
+            text=f"Total: {len(subfolders)} carpetas  |  {mixed_count} mezcladas  |  {review_count} con archivos para revisión manual"
         )
         self.btn_apply.config(state=tk.NORMAL if mixed_count > 0 else tk.DISABLED)
 
@@ -2042,7 +2057,14 @@ class FolderSeparatorDialog(tk.Toplevel):
                     for fn in act["files"]:
                         self.txt_detail.insert(tk.END, f"     • {fn}\n")
             else:
-                self.txt_detail.insert(tk.END, "Todos los archivos de esta carpeta pertenecen al mismo Libro y Sección.\n")
+                self.txt_detail.insert(tk.END, "Todos los archivos regulares de esta carpeta pertenecen al mismo Libro y Sección.\n")
+
+            irreg_items = insp.get("irregular_files", [])
+            if irreg_items:
+                self.txt_detail.insert(tk.END, f"\n=== ARCHIVOS PARA REVISIÓN MANUAL ({len(irreg_items)}) ===\n")
+                self.txt_detail.insert(tk.END, "(Permanecen seguros en la carpeta origen; no se separan en carpetas extrañas):\n")
+                for it in irreg_items:
+                    self.txt_detail.insert(tk.END, f"  • {it['pdf_name']} -> {it.get('irregular_reason', 'Formato no estándar')}\n")
 
     def _apply_splits(self):
         mixed_items = [item for item in self.inspected_folders if item.get("is_mixed")]
@@ -2829,7 +2851,7 @@ class OCRLibrosApp(tk.Tk):
         subfolders = self.service.get_valid_subfolders(folder_path)
         if not subfolders:
             p = Path(folder_path)
-            if p.exists() and p.is_dir() and "_" in p.name:
+            if p.exists() and p.is_dir() and PDFSelector.is_book_folder_name(p.name):
                 if any(f.suffix.lower() == ".pdf" for f in p.iterdir() if f.is_file()):
                     subfolders = [p]
         return subfolders
@@ -2885,12 +2907,12 @@ class OCRLibrosApp(tk.Tk):
             self._refresh_master_table()
             self.lbl_veredicto.config(
                 text=(
-                    f"Pre-carga lista: {len(subfolders)} carpetas con '_' detectadas. "
+                    f"Pre-carga lista: {len(subfolders)} carpetas de libro detectadas. "
                     "Verifica las carátulas auto-detectadas y pulsa '🔍 Ejecutar Diagnóstico General'."
                 ),
                 fg="#0284c7"
             )
-            self.lbl_info.config(text="(Ignorando subcarpetas y carpetas sin '_' como BUENOS/MALOS)")
+            self.lbl_info.config(text="(Incluye carpetas con '_' o '-'; ignora subcarpetas y BUENOS/MALOS)")
             self._refresh_header_badge()
         except Exception as exc:
             messagebox.showerror("Error al leer raíz", str(exc))

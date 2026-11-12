@@ -17,12 +17,26 @@ class PDFSelector:
     - El penúltimo PDF
     """
 
+    # Carpetas de control que nunca deben listarse como libros
+    RESERVED_FOLDER_NAMES = {"BUENOS", "MALOS", "APARTADOS", "VALIDADOS", "CORRECTOS", "ROLLBACK_BACKUPS"}
+
+    @staticmethod
+    def is_book_folder_name(name: str) -> bool:
+        """
+        Una carpeta es candidata a libro si su nombre contiene '_' o '-' como separador
+        (p. ej. '01_01_03_01_00_00_1997' o nombres mal capturados con guiones como
+        '1994-02-02-00-00-00-477-0477-0955') y no es una carpeta de control reservada.
+        """
+        if name.strip().upper() in PDFSelector.RESERVED_FOLDER_NAMES:
+            return False
+        return "_" in name or "-" in name
+
     @staticmethod
     def get_valid_subfolders(root_path: str) -> List[Path]:
         """
-        Obtiene únicamente las carpetas con '_' ubicadas directamente en el primer nivel
-        de la carpeta raíz seleccionada (sin entrar a subcarpetas ni analizar carpetas
-        como BUENOS o MALOS).
+        Obtiene las carpetas de libro ('_' o '-' en el nombre) ubicadas directamente en el
+        primer nivel de la carpeta raíz seleccionada (sin entrar a subcarpetas ni analizar
+        carpetas de control como BUENOS o MALOS).
         """
         root = Path(root_path)
         if not root.exists() or not root.is_dir():
@@ -31,7 +45,7 @@ class PDFSelector:
         valid_folders: List[Path] = []
         with os.scandir(str(root)) as entries:
             for entry in entries:
-                if entry.is_dir() and "_" in entry.name:
+                if entry.is_dir() and PDFSelector.is_book_folder_name(entry.name):
                     valid_folders.append(Path(entry.path))
 
         valid_folders.sort(key=lambda p: natural_sort_key(p.name))

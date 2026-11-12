@@ -28,6 +28,8 @@ class FolderFileSeparator:
         """
         Analiza el nombre de un PDF y extrae su clave de grupo hasta el año.
         Estructura típica: [del]_[sec]_[lib]_[tom]_[vol]_[fracc]_[anio]_[hoja]_[copia].pdf
+        Si el archivo no sigue una estructura de libro con año reconocible (ej. 'REG_-60.pdf'),
+        se cataloga como archivo irregular para revisión manual sin crear carpetas separadas absurdas.
         """
         stem = Path(pdf_name).stem
         is_caratula = bool(re.search(r"CARATULA", stem, re.IGNORECASE))
@@ -47,23 +49,32 @@ class FolderFileSeparator:
                 year_val = tok
                 break
 
+        is_irregular = False
+        irregular_reason = None
+        prefix = None
+
         if year_idx != -1 and year_idx >= 3:
-            # Clave hasta el año
+            # Clave estándar hasta el año
             prefix = "_".join(tokens[:year_idx + 1])
         else:
-            # Fallback regex
+            # Fallback regex para buscar año con delimitadores
             m = re.search(r"^(.*?_(?:18\d{2}|19\d{2}|20\d{2}|0000))", clean_stem)
             if m:
                 prefix = m.group(1)
             else:
-                prefix = clean_stem
+                # No tiene año ni estructura reconocible de libro
+                is_irregular = True
+                irregular_reason = "Nombre fuera de estándar registral (sin código de libro o año detectable)"
+                prefix = "REVISION_MANUAL"
 
-        # Intentar extraer campos para metadatos
-        parsed_fields = FolderParser.parse(prefix)
+        # Intentar extraer campos para metadatos si tiene estructura
+        parsed_fields = FolderParser.parse(prefix) if not is_irregular else {}
 
         return {
             "pdf_name": pdf_name,
             "group_key": prefix,
+            "is_irregular": is_irregular,
+            "irregular_reason": irregular_reason,
             "is_caratula": is_caratula,
             "seccion": parsed_fields.get("seccion"),
             "libro": parsed_fields.get("libro"),
@@ -76,6 +87,7 @@ class FolderFileSeparator:
     def inspect_folder_groups(self, folder_path: Path) -> Dict[str, Any]:
         """
         Inspecciona los PDFs de la carpeta y determina si hay mezcla de libros.
+        Separa archivos con formato de libro estándar de archivos irregulares para revisión manual.
         """
         folder_path = Path(folder_path)
         if not folder_path.is_dir():
@@ -96,17 +108,27 @@ class FolderFileSeparator:
             }
 
         groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        irregular_files: List[Dict[str, Any]] = []
+
         for pdf_file in pdfs:
             info = self.parse_pdf_group_key(pdf_file.name)
             info["full_path"] = str(pdf_file)
-            groups[info["group_key"]].append(info)
+            if info.get("is_irregular"):
+                irregular_files.append(info)
+            else:
+                groups[info["group_key"]].append(info)
 
-        # Si hay más de un grupo, está mezclada
-        is_mixed = len(groups) > 1
+        # Si hay más de un grupo estándar válido, la carpeta está realmente mezclada
+        valid_group_count = len(groups)
+        is_mixed = valid_group_count > 1
 
-        # Identificar grupo primario (el que tiene más PDFs)
-        sorted_groups = sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
-        primary_group_key = sorted_groups[0][0] if sorted_groups else ""
+        # Identificar grupo primario (el grupo estándar con más PDFs)
+        if groups:
+            sorted_groups = sorted(groups.items(), key=lambda item: len(item[1]), reverse=True)
+            primary_group_key = sorted_groups[0][0]
+        else:
+            sorted_groups = []
+            primary_group_key = "REVISION_MANUAL"
 
         groups_summary = {}
         for g_key, items in sorted_groups:
@@ -118,16 +140,25 @@ class FolderFileSeparator:
                 "is_primary": (g_key == primary_group_key)
             }
 
+        if is_mixed:
+            status = "MEZCLADA"
+        elif irregular_files:
+            status = "HOMOGENEA_CON_IRREGULARES"
+        else:
+            status = "HOMOGENEA"
+
         return {
             "folder_path": str(folder_path),
             "folder_name": folder_path.name,
             "total_pdfs": len(pdfs),
-            "total_groups": len(groups),
+            "total_groups": valid_group_count,
             "is_mixed": is_mixed,
             "primary_group": primary_group_key,
             "groups_summary": groups_summary,
-            "groups_detail": groups,
-            "status": "MEZCLADA" if is_mixed else "HOMOGENEA"
+            "groups_detail": dict(groups),
+            "irregular_files": irregular_files,
+            "irregular_files_count": len(irregular_files),
+            "status": status
         }
 
     def preview_folder_split(self, folder_path: Path) -> Dict[str, Any]:
