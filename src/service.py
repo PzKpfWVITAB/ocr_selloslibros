@@ -847,18 +847,77 @@ class FolderOCRService:
 
         return res
 
+    def execute_embedded_caratula_creation(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extrae y genera físicamente el archivo de carátula _CARATULA_00.pdf a partir de la
+        página 1 compartida en los archivos de la carpeta, independientemente de si la carpeta
+        necesita renombrarse o no.
+        """
+        emb_to_create = diag_result.get("embedded_caratula_to_create")
+        if not emb_to_create:
+            return {"created": False, "message": "No hay carátula embebida pendiente de creación."}
+
+        folder_path = Path(diag_result.get("folder_path", ""))
+        if not folder_path.exists():
+            return {"created": False, "error": f"La carpeta no existe: {folder_path}"}
+
+        clean_base = diag_result.get("codigo_base_sugerido") or FileOperations.strip_suffix_after_year(folder_path.name)
+        target_c_name = emb_to_create.get("target_name") or f"{clean_base}_CARATULA_00.pdf"
+
+        target_file = folder_path / target_c_name
+        insp = diag_result.setdefault("caratula_inspection", {})
+        if target_file.exists():
+            insp["caratula_filename"] = target_c_name
+            insp["caratula_path"] = str(target_file)
+            insp["status"] = "OK_CON_INFO"
+            diag_result["embedded_caratula_to_create"] = None
+            return {"created": True, "already_existed": True, "caratula_path": str(target_file)}
+
+        src_pdf = Path(emb_to_create.get("source_pdf", ""))
+        if not src_pdf.exists():
+            src_pdf = folder_path / src_pdf.name
+        if not src_pdf.exists():
+            candidates = [f for f in folder_path.glob("*.pdf") if "CARATULA" not in f.name]
+            if candidates:
+                src_pdf = candidates[0]
+
+        if not src_pdf.exists():
+            return {"created": False, "error": "No se encontró PDF origen para extraer la carátula."}
+
+        c_res = FileOperations.create_caratula_from_pdf_page(
+            folder_path=folder_path,
+            source_pdf_path=src_pdf,
+            page_num=emb_to_create.get("page_num", 1),
+            target_caratula_name=target_c_name,
+            db_manager=self.db,
+            mysql_manager=self.mysql,
+        )
+        if c_res.get("created"):
+            insp["caratula_filename"] = target_c_name
+            insp["caratula_path"] = str(folder_path / target_c_name)
+            insp["status"] = "OK_CON_INFO"
+            diag_result["embedded_caratula_to_create"] = None
+            actions = list(diag_result.get("applied_actions", []))
+            actions.append(f"📄 Carátula física extraída y creada: {target_c_name}")
+            diag_result["applied_actions"] = actions
+            diag_result["last_action"] = f"📄 Carátula Creada ({target_c_name})"
+            diag_result["files_modified_count"] = diag_result.get("files_modified_count", 0) + 1
+
+        return c_res
+
     def execute_all_pending_corrections(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Ejecuta en un solo paso todas las correcciones físicas pendientes en disco:
         1. Reemplazo o inserción de carátula en PDFs regulares y DUP (excluyendo REG).
-        2. Extracción y creación física de carátula embebida si aplica.
+        2. Extracción y creación física de carátula embebida si aplica (independiente de renombrado).
         3. Renombrado de carpeta y PDFs regulares y DUP (excluyendo REG).
+        4. Re-evaluación del veredicto final.
         Todo queda respaldado en SQLite y backups_rollback/ para Rollback total.
         """
         applied_now = []
         modified_count = 0
 
-        # Paso 1: Reemplazo o inserción de carátulas si aplica
+        # Paso 1: Reemplazo o inserción de carátulas en blanco
         if diag_result.get("needs_page_replacement") and diag_result.get("caratula_inspection", {}).get("replaceable_pdfs"):
             try:
                 rep_res = self.execute_page_replacement(diag_result)
@@ -868,7 +927,17 @@ class FolderOCRService:
             except Exception as exc:
                 applied_now.append(f"⚠ Error al corregir carátula: {exc}")
 
-        # Paso 2: Renombrado de carpeta y PDFs (conservando DUP e ignorando REG)
+        # Paso 2: Extracción y creación física de carátula embebida (independiente de si necesita renombre)
+        if diag_result.get("embedded_caratula_to_create"):
+            try:
+                emb_res = self.execute_embedded_caratula_creation(diag_result)
+                if emb_res.get("created"):
+                    modified_count += 1
+                    applied_now.append("📄 Carátula física extraída y creada")
+            except Exception as exc:
+                applied_now.append(f"⚠ Error al crear carátula física: {exc}")
+
+        # Paso 3: Renombrado de carpeta y PDFs (conservando DUP e ignorando REG)
         if diag_result.get("needs_rename"):
             try:
                 ren_res = self.execute_folder_and_pdfs_rename(diag_result)
@@ -878,11 +947,139 @@ class FolderOCRService:
             except Exception as exc:
                 applied_now.append(f"⚠ Error al renombrar: {exc}")
 
+        # Paso 4: Re-evaluación inmediata de estado
+        insp = diag_result.get("caratula_inspection", {})
+        has_dup = len(insp.get("dup_pdfs", [])) > 0
+        has_reg = len(insp.get("irregular_pdfs", [])) > 0
+        folder_p = Path(diag_result.get("folder_path", ""))
+        clean_code = diag_result.get("codigo_base_sugerido") or FileOperations.strip_suffix_after_year(folder_p.name)
+        caratula_file = folder_p / f"{clean_code}_CARATULA_00.pdf"
+        caratula_exists = caratula_file.exists() or (insp.get("caratula_path") and Path(insp["caratula_path"]).exists())
+
+        if caratula_exists and not has_dup and not has_reg and not diag_result.get("needs_page_replacement"):
+            if folder_p.name == clean_code:
+                diag_result["veredicto_global"] = "COINCIDE_TOTAL"
+                diag_result["needs_rename"] = False
+                diag_result["has_discrepancy"] = False
+                insp["status"] = "OK_CON_INFO"
+
         return {
             "success": True,
             "modified_count": modified_count,
             "applied_actions": applied_now,
             "folder_path": diag_result.get("folder_path"),
+        }
+
+    def audit_folder_congruence(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Audita la congruencia física y estructural entre la información en memoria/BD
+        y el estado real del disco en este momento.
+        """
+        folder_path_str = diag_result.get("folder_path", "")
+        folder_p = Path(folder_path_str)
+        discrepancies: List[str] = []
+        suggested_action = "OK"
+
+        if not folder_p.exists():
+            discrepancies.append(f"Carpeta no encontrada en ruta actual: {folder_p.name}")
+            return {
+                "folder_name": folder_p.name,
+                "exists_on_disk": False,
+                "is_congruent": False,
+                "discrepancies": discrepancies,
+                "suggested_action": "Buscar carpeta en destino o actualizar ruta",
+                "physical_caratula": None,
+                "physical_pdfs_count": 0,
+            }
+
+        pdfs = list(folder_p.glob("*.pdf"))
+        caratulas = [f.name for f in pdfs if "CARATULA" in f.name.upper()]
+        has_physical_caratula = len(caratulas) > 0
+        physical_c_name = caratulas[0] if caratulas else None
+
+        insp = diag_result.get("caratula_inspection", {})
+        mem_c_name = insp.get("caratula_filename", "")
+        is_mem_embedded = mem_c_name.startswith("[EMBEBIDA]") or (diag_result.get("embedded_caratula_to_create") is not None)
+
+        if has_physical_caratula and is_mem_embedded:
+            discrepancies.append(f"Carátula física '{physical_c_name}' YA existe en disco, pero en memoria figura como '{mem_c_name}'")
+            suggested_action = "Reconocer Carátula Física OK_CON_INFO"
+
+        clean_sugerido = diag_result.get("codigo_base_sugerido") or FileOperations.strip_suffix_after_year(folder_p.name)
+        if diag_result.get("needs_rename") and folder_p.name == clean_sugerido:
+            discrepancies.append(f"Marcada como 'needs_rename=True', pero el nombre en disco '{folder_p.name}' ya coincide con el sugerido")
+            suggested_action = "Limpiar bandera de renombre y validar COINCIDE_TOTAL"
+
+        v_global = diag_result.get("veredicto_global", "")
+        has_dup = len(insp.get("dup_pdfs", [])) > 0
+        has_reg = len(insp.get("irregular_pdfs", [])) > 0
+        if has_physical_caratula and folder_p.name == clean_sugerido and not has_dup and not has_reg:
+            if v_global not in ("COINCIDE_TOTAL", "MOVIDO_A_CORRECTOS"):
+                discrepancies.append(f"Veredicto en memoria es '{v_global}', pero físicamente ya cumple COINCIDE_TOTAL")
+                suggested_action = "Actualizar a COINCIDE_TOTAL"
+
+        is_congruent = (len(discrepancies) == 0)
+        return {
+            "folder_name": folder_p.name,
+            "exists_on_disk": True,
+            "is_congruent": is_congruent,
+            "discrepancies": discrepancies,
+            "suggested_action": suggested_action,
+            "physical_caratula": physical_c_name,
+            "physical_pdfs_count": len(pdfs),
+        }
+
+    def resync_folder_with_physical_disk(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resincroniza el objeto de diagnóstico en memoria y en la base de datos con el
+        estado real físico del disco en este instante.
+        """
+        folder_p = Path(diag_result.get("folder_path", ""))
+        if not folder_p.exists():
+            return {"success": False, "error": f"La carpeta no existe en disco: {folder_p}"}
+
+        pdfs = list(folder_p.glob("*.pdf"))
+        caratulas = [f for f in pdfs if "CARATULA" in f.name.upper()]
+        insp = diag_result.setdefault("caratula_inspection", {})
+        applied_changes = []
+
+        if caratulas:
+            c_file = caratulas[0]
+            if insp.get("caratula_filename") != c_file.name or insp.get("status") != "OK_CON_INFO":
+                insp["caratula_filename"] = c_file.name
+                insp["caratula_path"] = str(c_file)
+                insp["status"] = "OK_CON_INFO"
+                diag_result["embedded_caratula_to_create"] = None
+                applied_changes.append(f"Reconocida carátula física: {c_file.name}")
+
+        diag_result["folder_data"] = FolderParser.parse(folder_p.name)
+        clean_code = diag_result.get("codigo_base_sugerido") or FileOperations.strip_suffix_after_year(folder_p.name)
+
+        has_dup = len(insp.get("dup_pdfs", [])) > 0
+        has_reg = len(insp.get("irregular_pdfs", [])) > 0
+
+        if folder_p.name == clean_code:
+            if diag_result.get("needs_rename"):
+                diag_result["needs_rename"] = False
+                applied_changes.append("Bandera de renombre retirada (nombre ya coincide)")
+
+        if caratulas and folder_p.name == clean_code and not has_dup and not has_reg:
+            if diag_result.get("veredicto_global") not in ("COINCIDE_TOTAL", "MOVIDO_A_CORRECTOS"):
+                diag_result["veredicto_global"] = "COINCIDE_TOTAL"
+                diag_result["has_discrepancy"] = False
+                diag_result["needs_apartar"] = False
+                applied_changes.append("Veredicto actualizado a COINCIDE_TOTAL")
+
+        if self.db:
+            try:
+                self.db.guardar_deteccion(diag_result)
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "folder_name": folder_p.name,
+            "applied_changes": applied_changes,
         }
 
     def execute_move_to_apartados(

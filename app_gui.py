@@ -2168,10 +2168,15 @@ class OCRLibrosApp(tk.Tk):
         self.style.configure("SubHeader.TLabel", font=("Segoe UI", 9), foreground="#475569")
         self.style.configure("Primary.TButton", font=("Segoe UI", 9, "bold"), padding=5)
         self.style.configure("Action.TButton", font=("Segoe UI", 9, "bold"), padding=5)
+        self.style.configure("Success.TButton", font=("Segoe UI", 9, "bold"), padding=5, foreground="#15803d")
+        self.style.configure("Warning.TButton", font=("Segoe UI", 9, "bold"), padding=5, foreground="#b45309")
+        self.style.configure("Info.TButton", font=("Segoe UI", 9, "bold"), padding=5, foreground="#0369a1")
         self.style.configure("Config.TButton", font=("Segoe UI", 9, "bold"), padding=5)
-        self.style.configure("Danger.TButton", font=("Segoe UI", 9, "bold"), padding=5)
+        self.style.configure("Danger.TButton", font=("Segoe UI", 9, "bold"), padding=5, foreground="#b91c1c")
         self.style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
         self.style.configure("Treeview", rowheight=25)
+        self.style.configure("Card.TLabelframe", padding=6)
+        self.style.configure("Card.TLabelframe.Label", font=("Segoe UI", 9, "bold"), foreground="#1e293b")
 
     def _create_menu(self):
         menubar = tk.Menu(self)
@@ -2370,180 +2375,190 @@ class OCRLibrosApp(tk.Tk):
         )
         self.progressbar.pack(fill=tk.X, pady=(5, 0))
 
-        # 4. Barra de Fase 2: Revisión Manual, Confirmación de Carátula y Acciones Físicas
-        action_frame = ttk.LabelFrame(
-            main_frame,
-            text=" 2. Acciones sobre la Carpeta Seleccionada o en Lote (Registradas en SQLite con Rollback) ",
-            padding=8
+        # 4. Panel de Herramientas Clasificadas y Separadas Visualmente
+        tools_container = ttk.Frame(main_frame)
+        tools_container.pack(fill=tk.X, pady=(0, 8))
+
+        # --- TARJETA 1: Acciones sobre la Carpeta Seleccionada ---
+        card_single = ttk.LabelFrame(
+            tools_container,
+            text=" 📦 1. Carpeta Seleccionada (Herramientas Individuales) ",
+            padding=6,
+            style="Card.TLabelframe"
         )
-        action_frame.pack(fill=tk.X, pady=(0, 8))
+        card_single.pack(fill=tk.X, pady=(0, 5))
 
-        row_act1 = ttk.Frame(action_frame)
-        row_act1.pack(fill=tk.X, pady=(0, 5))
-
+        row_s1 = ttk.Frame(card_single)
+        row_s1.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
-            row_act1,
-            text="📂 Abrir Carpeta en Explorador",
+            row_s1,
+            text="📂 Abrir en Explorador",
             command=self.open_selected_folder_in_explorer
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
+            row_s1,
             text="📄 Cambiar PDF Carátula...",
             command=self.change_selected_folder_caratula
-        ).pack(side=tk.LEFT, padx=(0, 12))
-
-        ttk.Label(row_act1, text="Código Base (hasta el Año, Pos.1 fija):").pack(side=tk.LEFT, padx=(0, 4))
-        self.suggested_code_var = tk.StringVar(value="")
-        ttk.Entry(row_act1, textvariable=self.suggested_code_var, font=("Consolas", 10, "bold"), width=28).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-
-        ttk.Button(
-            row_act1,
-            text="⚡ Aplicar Todo a esta Carpeta",
-            style="Primary.TButton",
-            command=self.apply_all_single_folder
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
-            text="📝 Editar Campos...",
+            row_s1,
+            text="📝 Editar Campos Manualmente...",
             command=self.open_manual_edit_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
-            text="✏️ Renombrar Carpeta Seleccionada y sus PDFs",
+            row_s1,
+            text="🔍 Re-analizar Carpeta",
+            style="Info.TButton",
+            command=self.reanalyze_selected_folder
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        row_s2 = ttk.Frame(card_single)
+        row_s2.pack(fill=tk.X)
+        ttk.Label(row_s2, text="Código Base (hasta Año):", font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        self.suggested_code_var = tk.StringVar(value="")
+        ttk.Entry(row_s2, textvariable=self.suggested_code_var, font=("Consolas", 10, "bold"), width=24).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(
+            row_s2,
+            text="⚡ Aplicar Todo a esta Carpeta",
+            style="Success.TButton",
+            command=self.apply_all_single_folder
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_s2,
+            text="✏️ Renombrar Carpeta y PDFs",
             style="Primary.TButton",
             command=self.rename_selected_folder
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
-            text="🛠 Reemplazar Hojas Blancas (Carpeta Seleccionada)",
+            row_s2,
+            text="🛠 Reemplazar Hoja Blanca",
+            style="Warning.TButton",
             command=self.replace_blank_pages_selected_folder
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
+            row_s2,
             text="📦 Apartar Seleccionada",
+            style="Warning.TButton",
             command=self.apartar_selected_folder
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act1,
-            text="✅ Mover Seleccionada a Correctos",
+            row_s2,
+            text="✅ Mover a Correctos",
+            style="Success.TButton",
             command=self.move_selected_folder_to_validados
         ).pack(side=tk.LEFT)
 
-        row_act2 = ttk.Frame(action_frame)
-        row_act2.pack(fill=tk.X)
+        # --- TARJETA 2: Automatizaciones y Acciones Masivas por Lote ---
+        card_batch = ttk.LabelFrame(
+            tools_container,
+            text=" ⚡ 2. Correcciones Masivas y Lotes (Ejecución Asíncrona sin Bloquear la Ventana) ",
+            padding=6,
+            style="Card.TLabelframe"
+        )
+        card_batch.pack(fill=tk.X, pady=(0, 5))
 
-        ttk.Label(
-            row_act2,
-            text="Acciones Masivas del Diagnóstico:",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#334155"
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
+        row_b1 = ttk.Frame(card_batch)
+        row_b1.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
-            row_act2,
-            text="⚡ Aplicar TODAS las Correcciones Físicas (Hojas + Renombres)",
+            row_b1,
+            text="⚡ Aplicar TODAS las Correcciones Físicas (Hojas + Carátulas + Renombres)",
             style="Primary.TButton",
             command=self.batch_apply_all_corrections
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act2,
+            row_b1,
             text="🛠 Reemplazar Hojas en Blanco (TODAS)",
+            style="Warning.TButton",
             command=self.batch_replace_all_blank_pages
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act2,
+            row_b1,
             text="✏️ Aplicar Renombre (TODAS las Discrepancias)",
+            style="Action.TButton",
             command=self.batch_rename_all_discrepancies
         ).pack(side=tk.LEFT, padx=(0, 6))
 
+        row_b2 = ttk.Frame(card_batch)
+        row_b2.pack(fill=tk.X)
         ttk.Button(
-            row_act2,
-            text="📦 Enviar a Revisión / Apartados (por Subcarpeta de Error)",
+            row_b2,
+            text="📦 Enviar TODAS a Revisión / Apartados (por Subcarpeta de Error)",
+            style="Warning.TButton",
             command=self.batch_move_all_blank_caratulas
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act2,
+            row_b2,
             text="✅ Mover TODAS las Carpetas Correctas (COINCIDE TOTAL) a Dir. Correctos",
-            style="Primary.TButton",
+            style="Success.TButton",
             command=self.batch_move_all_validados
         ).pack(side=tk.LEFT)
 
-        row_act3 = ttk.Frame(action_frame)
-        row_act3.pack(fill=tk.X, pady=(6, 0))
+        # --- TARJETA 3: Auditoría, Trazabilidad y Control Físico ---
+        card_audit = ttk.LabelFrame(
+            tools_container,
+            text=" 🛡️ 3. Auditoría de Congruencia (BD vs Disco), Trazabilidad y Rollback ",
+            padding=6,
+            style="Card.TLabelframe"
+        )
+        card_audit.pack(fill=tk.X, pady=(0, 4))
 
-        ttk.Label(
-            row_act3,
-            text="Herramientas Físicas y Trazabilidad:",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#0369a1"
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
+        row_a1 = ttk.Frame(card_audit)
+        row_a1.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
-            row_act3,
-            text="📁 Renombrar Carpetas por 1er PDF (hasta Año + Regla 0000)",
-            style="Primary.TButton",
-            command=self.open_folder_renamer_dialog
+            row_a1,
+            text="🔍 Auditar Congruencia (BD vs Disco Físico)",
+            style="Info.TButton",
+            command=self.audit_congruence_async
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act3,
+            row_a1,
+            text="⚡ Resincronizar Todo con Disco (Confirmado)",
+            style="Success.TButton",
+            command=self.resync_with_disk_confirmed
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_a1,
             text="🔀 Separar Archivos Mezclados (Libros/Secciones Distintos)",
             style="Action.TButton",
             command=self.open_folder_separator_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act3,
+            row_a1,
+            text="📁 Renombrar Carpetas por 1er PDF (hasta Año + Regla 0000)",
+            style="Primary.TButton",
+            command=self.open_folder_renamer_dialog
+        ).pack(side=tk.LEFT)
+
+        row_a2 = ttk.Frame(card_audit)
+        row_a2.pack(fill=tk.X)
+        ttk.Button(
+            row_a2,
             text="🗄 Conexión MySQL & Trazabilidad",
             command=self.open_mysql_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act3,
-            text="📊 Estadísticas y Dimensionamiento (Original vs Final)",
-            style="Primary.TButton",
+            row_a2,
+            text="📊 Estadísticas (Original vs Final)",
             command=self.open_statistics_dashboard
-        ).pack(side=tk.LEFT)
-
-        row_act4 = ttk.Frame(action_frame)
-        row_act4.pack(fill=tk.X, pady=(6, 0))
-
-        ttk.Label(
-            row_act4,
-            text="🛡️ Control y Reversión Total (Deshacer):",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#b45309"
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
+        ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
-            row_act4,
+            row_a2,
             text="⏪ Deshacer TODO (Rollback Físico al Origen Inicial)",
             style="Action.TButton",
             command=self.trigger_full_physical_rollback
         ).pack(side=tk.LEFT, padx=(0, 6))
-
         ttk.Button(
-            row_act4,
-            text="🧹 Reset Maestro (Rollback Físico + Limpiar Bases de Datos a Cero)",
-            style="Danger.TButton",
-            command=self.trigger_full_system_reset
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
-        ttk.Button(
-            row_act4,
+            row_a2,
             text="📁 Revertir Solo Carpeta Seleccionada",
             command=self.rollback_selected_folder_direct
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_a2,
+            text="🧹 Reset Maestro de Sistema",
+            style="Danger.TButton",
+            command=self.trigger_full_system_reset
         ).pack(side=tk.LEFT)
 
         # 5. Panel Dividido (Pestañas en Tiempo Real + Detalle)
@@ -2564,11 +2579,13 @@ class OCRLibrosApp(tk.Tk):
         self.tab_pending = ttk.Frame(self.notebook_tabs, padding=2)
         self.tab_ready = ttk.Frame(self.notebook_tabs, padding=2)
         self.tab_done = ttk.Frame(self.notebook_tabs, padding=2)
+        self.tab_audit = ttk.Frame(self.notebook_tabs, padding=2)
 
         self.notebook_tabs.add(self.tab_all, text="📋 Todas en Raíz (0)")
         self.notebook_tabs.add(self.tab_pending, text="⚠ Pendientes por Corregir / Apartar (0)")
         self.notebook_tabs.add(self.tab_ready, text="✔ Listas / Correctas (0)")
         self.notebook_tabs.add(self.tab_done, text="✅ Ya Hecho / Cambios Aplicados (0)")
+        self.notebook_tabs.add(self.tab_audit, text="🔍 Auditoría de Congruencia (BD vs Disco) (0)")
 
         self.tree_folders = self._build_folder_treeview(self.tab_all)
         self.tree_pending = self._build_folder_treeview(self.tab_pending)
@@ -2632,6 +2649,64 @@ class OCRLibrosApp(tk.Tk):
         self.tree_done.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_done.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_done.bind("<<TreeviewSelect>>", lambda e: self._on_folder_selected(e, self.tree_done))
+
+        # Pestaña 5: Auditoría de Congruencia (BD vs Disco Físico)
+        audit_toolbar = ttk.Frame(self.tab_audit)
+        audit_toolbar.pack(fill=tk.X, pady=(0, 4))
+        self.lbl_audit_summary = ttk.Label(
+            audit_toolbar,
+            text="Compara el estado en memoria/BD contra la realidad física del disco en red.",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#0369a1"
+        )
+        self.lbl_audit_summary.pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Button(
+            audit_toolbar,
+            text="🔍 Auditar Congruencia Ahora",
+            style="Primary.TButton",
+            command=self.audit_congruence_async
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            audit_toolbar,
+            text="⚡ Resincronizar Todo con Disco (Confirmado)",
+            style="Success.TButton",
+            command=self.resync_with_disk_confirmed
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        audit_table_frame = ttk.Frame(self.tab_audit)
+        audit_table_frame.pack(fill=tk.BOTH, expand=True)
+        audit_cols = (
+            "num",
+            "carpeta",
+            "estado_memoria",
+            "caratula_disco",
+            "pdfs_disco",
+            "discrepancias",
+            "accion_sugerida",
+        )
+        self.tree_audit = ttk.Treeview(audit_table_frame, columns=audit_cols, show="headings", height=9)
+        self.tree_audit.heading("num", text="#")
+        self.tree_audit.heading("carpeta", text="Carpeta")
+        self.tree_audit.heading("estado_memoria", text="Estado en Memoria / BD")
+        self.tree_audit.heading("caratula_disco", text="Carátula Física en Disco")
+        self.tree_audit.heading("pdfs_disco", text="PDFs en Disco")
+        self.tree_audit.heading("discrepancias", text="Discrepancia Detectada")
+        self.tree_audit.heading("accion_sugerida", text="Acción de Sincronización")
+
+        self.tree_audit.column("num", width=42, anchor=tk.CENTER, stretch=False)
+        self.tree_audit.column("carpeta", width=220, anchor=tk.W)
+        self.tree_audit.column("estado_memoria", width=175, anchor=tk.CENTER)
+        self.tree_audit.column("caratula_disco", width=230, anchor=tk.W)
+        self.tree_audit.column("pdfs_disco", width=95, anchor=tk.CENTER)
+        self.tree_audit.column("discrepancias", width=285, anchor=tk.W)
+        self.tree_audit.column("accion_sugerida", width=220, anchor=tk.W)
+
+        self._configure_tree_tags(self.tree_audit)
+        scroll_audit = ttk.Scrollbar(audit_table_frame, orient=tk.VERTICAL, command=self.tree_audit.yview)
+        self.tree_audit.configure(yscrollcommand=scroll_audit.set)
+        self.tree_audit.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_audit.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_audit.bind("<<TreeviewSelect>>", lambda e: self._on_folder_selected(e, self.tree_audit))
 
         self.active_tree = self.tree_folders
         self.notebook_tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -2987,7 +3062,7 @@ class OCRLibrosApp(tk.Tk):
 
     def _on_tab_changed(self, event=None):
         tab_idx = self.notebook_tabs.index(self.notebook_tabs.select())
-        trees = [self.tree_folders, self.tree_pending, self.tree_ready, self.tree_done]
+        trees = [self.tree_folders, self.tree_pending, self.tree_ready, self.tree_done, self.tree_audit]
         if 0 <= tab_idx < len(trees):
             self.active_tree = trees[tab_idx]
             sel = self.active_tree.selection()
@@ -3903,15 +3978,156 @@ class OCRLibrosApp(tk.Tk):
     # OPERACIONES EN LOTE (FASE 2)
     # =========================================================================
 
+    def reanalyze_selected_folder(self):
+        """
+        Re-analiza en tiempo real la carpeta seleccionada leyendo el estado físico actual del disco.
+        """
+        sel_res = self._get_selected_result()
+        if not sel_res:
+            messagebox.showwarning("Selección Requerida", "Selecciona una carpeta en la tabla para re-analizar.")
+            return
+
+        folder_path = sel_res.get("folder_path")
+        if not folder_path or not Path(folder_path).exists():
+            messagebox.showerror("Error", f"La carpeta no existe en disco: {folder_path}")
+            return
+
+        def _reanalyze_worker():
+            self.lbl_status.config(text=f"Re-analizando: {Path(folder_path).name}...")
+            try:
+                new_diag = self.service.process_folder(folder_path, save_to_db=True)
+                sel_res.clear()
+                sel_res.update(new_diag)
+                self.after(0, self._on_reanalyze_done, Path(folder_path).name)
+            except Exception as exc:
+                self.after(0, lambda e=exc: messagebox.showerror("Error al Re-analizar", str(e)))
+
+        thread = threading.Thread(target=_reanalyze_worker, daemon=True)
+        thread.start()
+
+    def _on_reanalyze_done(self, folder_name: str):
+        self._refresh_master_table()
+        self._refresh_header_badge()
+        self.lbl_status.config(text=f"✔ Carpeta '{folder_name}' re-analizada con éxito.")
+        messagebox.showinfo("Re-análisis Completado", f"La carpeta '{folder_name}' ha sido diagnosticada nuevamente con los datos reales en disco.")
+
+    def _run_async_batch_operation(
+        self,
+        op_title: str,
+        targets: List[Dict[str, Any]],
+        worker_func: Any,
+        on_complete: Optional[Any] = None
+    ):
+        """
+        Ejecuta cualquier lote masivo de forma 100% asíncrona en un hilo de fondo.
+        Mantiene la ventana de Tkinter completamente fluida y responsiva,
+        actualiza el progreso en tiempo real y permite cancelación limpia con Detener.
+        """
+        if not targets:
+            return
+
+        self.stop_requested = False
+        self.btn_stop.config(state=tk.NORMAL)
+        self.btn_run.config(state=tk.DISABLED)
+
+        total = len(targets)
+        self.progressbar["maximum"] = total
+        self.progressbar["value"] = 0
+
+        def _worker_thread():
+            processed_count = 0
+            errors: List[str] = []
+            results_payload = []
+
+            for idx, r in enumerate(targets, start=1):
+                if self.stop_requested:
+                    break
+
+                folder_name = Path(r.get("folder_path", "")).name
+                self.after(
+                    0,
+                    self._update_async_status,
+                    idx,
+                    total,
+                    f"[{idx}/{total}] Procesando: {folder_name} ({op_title})..."
+                )
+
+                try:
+                    res = worker_func(r)
+                    results_payload.append(res)
+                    processed_count += 1
+                except Exception as exc:
+                    errors.append(f"{folder_name}: {exc}")
+
+                self.after(0, self._on_async_item_finished, r, idx, total)
+
+            self.after(
+                0,
+                self._on_async_batch_completed,
+                op_title,
+                processed_count,
+                total,
+                errors,
+                on_complete,
+                results_payload
+            )
+
+        thread = threading.Thread(target=_worker_thread, daemon=True)
+        thread.start()
+
+    def _update_async_status(self, current: int, total: int, msg: str):
+        self.progressbar["value"] = current
+        self.lbl_status.config(text=msg)
+
+    def _on_async_item_finished(self, r: Dict[str, Any], current: int, total: int):
+        self.progressbar["value"] = current
+        self._refresh_master_table()
+        self._refresh_header_badge()
+
+    def _on_async_batch_completed(
+        self,
+        op_title: str,
+        processed: int,
+        total: int,
+        errors: List[str],
+        on_complete: Optional[Any],
+        results_payload: List[Any]
+    ):
+        self.btn_stop.config(state=tk.DISABLED)
+        self.btn_run.config(state=tk.NORMAL)
+        self.progressbar["value"] = total
+        status_text = f"✔ {op_title} finalizada ({processed}/{total} carpetas)."
+        if self.stop_requested:
+            status_text += " [Detenido por el usuario]"
+        if errors:
+            status_text += f" ({len(errors)} error(es))"
+        self.lbl_status.config(text=status_text)
+        self._refresh_master_table()
+        self._refresh_header_badge()
+
+        if on_complete:
+            try:
+                on_complete(results_payload, errors)
+            except Exception:
+                pass
+
+        summary_msg = f"{op_title} Finalizada:\n\nCarpetas procesadas: {processed} de {total}\n"
+        if self.stop_requested:
+            summary_msg += "⚠ Operación detenida antes de completar todo el lote.\n"
+        summary_msg += f"Errores: {len(errors)}" if errors else "Sin errores."
+        messagebox.showinfo(op_title, summary_msg)
+
     def batch_apply_all_corrections(self):
         targets = [
             r for r in self.all_folder_items
-            if r.get("needs_page_replacement", False) or r.get("needs_rename", False)
+            if r.get("needs_page_replacement", False)
+            or r.get("needs_rename", False)
+            or r.get("embedded_caratula_to_create")
         ]
         if not targets:
             messagebox.showinfo(
                 "Sin Correcciones Pendientes",
-                "No hay carpetas con correcciones físicas pendientes (hojas o renombres)."
+                "No hay carpetas con correcciones físicas pendientes (hojas, carátulas o renombres)."
             )
             return
 
@@ -3919,33 +4135,18 @@ class OCRLibrosApp(tk.Tk):
             "Confirmar Aplicación Masiva de Correcciones",
             f"Se aplicarán en disco todas las correcciones físicas pendientes en {len(targets)} carpeta(s):\n\n"
             "  • Inserción o reemplazo de carátulas en PDFs regulares y DUP (archivos REG intactos).\n"
-            "  • Extracción y creación física de carátulas embebidas si aplica.\n"
+            "  • Extracción y creación física de carátulas embebidas.\n"
             "  • Renombrado de carpetas y PDFs (DUP preservados, REG intactos).\n\n"
             "Todos los cambios quedarán respaldados en SQLite con soporte de Rollback total.\n"
-            "Las carpetas permanecerán en su ubicación para que puedas revisarlas en la tabla antes de trasladarlas.\n\n"
+            "El proceso se ejecutará de forma asíncrona sin congelar la ventana.\n\n"
             "¿Deseas continuar?"
         ):
             return
 
-        corrected_folders = 0
-        total_files = 0
-        errors: List[str] = []
-
-        for r in targets:
-            try:
-                op = self.service.execute_all_pending_corrections(r)
-                corrected_folders += 1
-                total_files += op.get("modified_count", 0)
-            except Exception as exc:
-                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
-
-        self._refresh_master_table()
-        self._refresh_header_badge()
-        messagebox.showinfo(
-            "Correcciones Físicas Finalizadas",
-            f"Carpetas procesadas: {corrected_folders}\n"
-            f"Archivos físicos modificados / renombrados: {total_files}\n"
-            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+        self._run_async_batch_operation(
+            op_title="Aplicar Correcciones Físicas",
+            targets=targets,
+            worker_func=lambda r: self.service.execute_all_pending_corrections(r)
         )
 
     def batch_replace_all_blank_pages(self):
@@ -3961,25 +4162,14 @@ class OCRLibrosApp(tk.Tk):
             "Confirmar Reemplazo Masivo de Hojas en Blanco",
             f"Se reemplazarán las hojas de carátula en blanco por la página con información en "
             f"{len(targets)} carpeta(s) detectadas.\n\n"
-            "Todos los archivos originales serán respaldados para Rollback. ¿Continuar?"
+            "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
         ):
             return
 
-        total_pdfs = 0
-        errors: List[str] = []
-        for r in targets:
-            try:
-                op = self.service.execute_page_replacement(r)
-                total_pdfs += op["replaced_count"]
-            except Exception as exc:
-                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
-
-        self._refresh_master_table()
-        self._refresh_header_badge()
-        messagebox.showinfo(
-            "Reemplazo Masivo Finalizado",
-            f"Carpetas procesadas: {len(targets)}\nTotal de PDFs corregidos: {total_pdfs}\n"
-            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+        self._run_async_batch_operation(
+            op_title="Reemplazo Masivo de Hojas",
+            targets=targets,
+            worker_func=lambda r: self.service.execute_page_replacement(r)
         )
 
     def batch_rename_all_discrepancies(self):
@@ -3998,27 +4188,15 @@ class OCRLibrosApp(tk.Tk):
         if not messagebox.askyesno(
             "Confirmar Renombrado Masivo",
             f"Se renombrarán {len(targets)} carpeta(s) y sus archivos PDF internos usando el código sugerido hasta el año "
-            "(agregando _2, _3 solo a la carpeta en caso de colisión).\n\n¿Continuar?"
+            "(agregando _2, _3 solo a la carpeta en caso de colisión).\n\n"
+            "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
         ):
             return
 
-        renamed_folders = 0
-        renamed_pdfs = 0
-        errors: List[str] = []
-        for r in targets:
-            try:
-                op = self.service.execute_folder_and_pdfs_rename(r)
-                renamed_folders += 1
-                renamed_pdfs += op["files_renamed_count"]
-            except Exception as exc:
-                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
-
-        self._refresh_master_table()
-        self._refresh_header_badge()
-        messagebox.showinfo(
-            "Renombrado Masivo Finalizado",
-            f"Carpetas renombradas: {renamed_folders}\nArchivos PDF renombrados: {renamed_pdfs}\n"
-            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+        self._run_async_batch_operation(
+            op_title="Renombrado Masivo",
+            targets=targets,
+            worker_func=lambda r: self.service.execute_folder_and_pdfs_rename(r)
         )
 
     def batch_move_all_blank_caratulas(self):
@@ -4051,29 +4229,14 @@ class OCRLibrosApp(tk.Tk):
             "Confirmar Envío Masivo a Revisión por Subcarpeta de Error",
             f"Se moverán {len(targets)} carpeta(s) al directorio:\n{apartados_dir}\n\n"
             f"Clasificadas automáticamente en las siguientes subcarpetas:\n{breakdown_lines}\n\n"
-            "¿Continuar?"
+            "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
         ):
             return
 
-        moved_folders = 0
-        moved_files = 0
-        errors: List[str] = []
-        for r in targets:
-            try:
-                op = self.service.execute_move_to_apartados(r, apartados_dir)
-                moved_folders += 1
-                moved_files += op["files_moved_count"]
-            except Exception as exc:
-                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
-
-        self._refresh_master_table()
-        self._refresh_header_badge()
-        messagebox.showinfo(
-            "Apartado Masivo Finalizado",
-            f"Carpetas apartadas: {moved_folders}\n"
-            f"Subcarpetas creadas/actualizadas:\n{breakdown_lines}\n\n"
-            f"Archivos registrados en SQLite con Rollback: {moved_files}\n"
-            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+        self._run_async_batch_operation(
+            op_title="Apartado Masivo a Revisión",
+            targets=targets,
+            worker_func=lambda r: self.service.execute_move_to_apartados(r, apartados_dir)
         )
 
     def batch_move_all_validados(self):
@@ -4102,7 +4265,6 @@ class OCRLibrosApp(tk.Tk):
             if not validados_dir:
                 return
 
-        # Evitar volver a mover carpetas que ya se encuentran dentro de validados_dir
         val_resolved = Path(validados_dir).resolve()
         filtered_targets = [
             r for r in targets
@@ -4119,28 +4281,126 @@ class OCRLibrosApp(tk.Tk):
             "Confirmar Movimiento Masivo de Carpetas Correctas",
             f"Se moverán {len(filtered_targets)} carpeta(s) que están totalmente bien (COINCIDE TOTAL) al directorio:\n"
             f"{validados_dir}\n\n"
-            "Todos los movimientos quedarán registrados en SQLite con Rollback. ¿Continuar?"
+            "Todos los movimientos quedarán registrados en SQLite con Rollback.\n"
+            "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
         ):
             return
 
-        moved_folders = 0
-        moved_files = 0
-        errors: List[str] = []
-        for r in filtered_targets:
-            try:
-                op = self.service.execute_move_to_validados(r, validados_dir)
-                moved_folders += 1
-                moved_files += op["files_moved_count"]
-            except Exception as exc:
-                errors.append(f"{Path(r.get('folder_path', '')).name}: {exc}")
+        self._run_async_batch_operation(
+            op_title="Mover Carpetas Correctas",
+            targets=filtered_targets,
+            worker_func=lambda r: self.service.execute_move_to_validados(r, validados_dir)
+        )
 
-        self._refresh_master_table()
-        self._refresh_header_badge()
-        messagebox.showinfo(
-            "Movimiento de Carpetas Correctas Finalizado",
-            f"Carpetas movidas a Correctos: {moved_folders}\n"
-            f"Archivos registrados en SQLite: {moved_files}\n"
-            + (f"Errores: {len(errors)}" if errors else "Sin errores.")
+    def audit_congruence_async(self):
+        """
+        Ejecuta la auditoría de congruencia entre la memoria/BD y el disco físico en red de forma asíncrona.
+        """
+        if not self.all_folder_items:
+            messagebox.showinfo("Sin Carpetas Cargadas", "Primero selecciona una carpeta raíz o ejecuta el diagnóstico.")
+            return
+
+        for item in self.tree_audit.get_children():
+            self.tree_audit.delete(item)
+
+        self.notebook_tabs.select(self.tab_audit)
+        targets = list(self.all_folder_items)
+
+        def _worker_audit():
+            self.stop_requested = False
+            self.btn_stop.config(state=tk.NORMAL)
+            self.progressbar["maximum"] = len(targets)
+            self.progressbar["value"] = 0
+
+            discrepant_count = 0
+            for idx, r in enumerate(targets, start=1):
+                if self.stop_requested:
+                    break
+
+                res = self.service.audit_folder_congruence(r)
+                if not res.get("is_congruent", True):
+                    discrepant_count += 1
+                    disc_str = "; ".join(res.get("discrepancies", []))
+                    row_vals = (
+                        idx,
+                        res.get("folder_name", ""),
+                        r.get("veredicto_global", ""),
+                        res.get("physical_caratula") or "❌ No encontrada",
+                        res.get("physical_pdfs_count", 0),
+                        disc_str,
+                        res.get("suggested_action", "")
+                    )
+                    self.after(0, self._insert_audit_row, f"audit_{idx}", row_vals)
+
+                self.after(0, self._update_async_status, idx, len(targets), f"Auditando [{idx}/{len(targets)}]: {res.get('folder_name', '')}")
+
+            self.after(0, self._on_audit_finished, discrepant_count, len(targets))
+
+        thread = threading.Thread(target=_worker_audit, daemon=True)
+        thread.start()
+
+    def _insert_audit_row(self, iid: str, row_vals: tuple):
+        self.tree_audit.insert("", tk.END, iid=iid, values=row_vals, tags=("diff",))
+
+    def _on_audit_finished(self, discrepant_count: int, total: int):
+        self.btn_stop.config(state=tk.DISABLED)
+        self.progressbar["value"] = total
+        self.notebook_tabs.tab(self.tab_audit, text=f"🔍 Auditoría de Congruencia ({discrepant_count})")
+        msg = f"Auditoría Finalizada: {discrepant_count} discrepancia(s) detectada(s) de {total} carpetas."
+        self.lbl_status.config(text=msg)
+        self.lbl_audit_summary.config(
+            text=f"Total Carpetas Auditadas: {total} | Discrepancias Físicas / Memoria: {discrepant_count}"
+        )
+        if discrepant_count > 0:
+            messagebox.showwarning(
+                "Discrepancias Detectadas",
+                f"Se detectaron {discrepant_count} carpetas con discrepancias entre la memoria/BD y el disco físico.\n\n"
+                "Revisa la tabla y presiona '⚡ Resincronizar Todo con Disco' para alinearlas con la realidad física."
+            )
+        else:
+            messagebox.showinfo("Congruencia Total", "¡Excelente! Todas las carpetas coinciden al 100% con el disco físico.")
+
+    def resync_with_disk_confirmed(self):
+        """
+        Muestra confirmación previa con el desglose de cambios antes de resincronizar la memoria y BD con el disco.
+        """
+        if not self.all_folder_items:
+            messagebox.showinfo("Sin Carpetas", "No hay carpetas cargadas para resincronizar.")
+            return
+
+        targets_to_resync = []
+        for r in self.all_folder_items:
+            audit_res = self.service.audit_folder_congruence(r)
+            if not audit_res.get("is_congruent", True):
+                targets_to_resync.append((r, audit_res))
+
+        if not targets_to_resync:
+            messagebox.showinfo("Todo en Orden", "No se detectaron discrepancias que requieran resincronización.")
+            return
+
+        preview_lines = []
+        for r, a_res in targets_to_resync[:8]:
+            preview_lines.append(f" • {a_res['folder_name']}: {a_res['suggested_action']}")
+        if len(targets_to_resync) > 8:
+            preview_lines.append(f" • ... y {len(targets_to_resync) - 8} carpeta(s) más.")
+
+        preview_text = "\n".join(preview_lines)
+
+        if not messagebox.askyesno(
+            "Confirmar Resincronización con Disco Físico",
+            f"Se detectaron {len(targets_to_resync)} carpetas desincronizadas.\n\n"
+            f"Resumen de acciones a aplicar en memoria y BD:\n"
+            f"{preview_text}\n\n"
+            "¿Deseas aplicar esta resincronización ahora mismo?"
+        ):
+            return
+
+        targets = [item[0] for item in targets_to_resync]
+        self._run_async_batch_operation(
+            op_title="Resincronizar con Disco",
+            targets=targets,
+            worker_func=lambda r: self.service.resync_folder_with_physical_disk(r),
+            on_complete=lambda res, err: self.audit_congruence_async()
         )
 
 
