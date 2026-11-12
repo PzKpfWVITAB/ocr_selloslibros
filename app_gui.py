@@ -2888,7 +2888,10 @@ class OCRLibrosApp(tk.Tk):
             return
         for item in self.tree_history.get_children():
             self.tree_history.delete(item)
-        rows = self.service.obtener_historial_ejecuciones()
+        try:
+            rows = self.service.obtener_historial_ejecuciones()
+        except Exception:
+            rows = []
         for row in rows:
             tag = "ok" if row.get("estado") == "COMPLETADO" else ("diff" if row.get("estado") == "REVERTIDO" else "")
             self.tree_history.insert(
@@ -3173,7 +3176,10 @@ class OCRLibrosApp(tk.Tk):
 
     def _on_tab_changed(self, event=None):
         tab_idx = self.notebook_tabs.index(self.notebook_tabs.select())
-        trees = [self.tree_folders, self.tree_pending, self.tree_ready, self.tree_done, self.tree_audit]
+        if tab_idx == 4:
+            self.refresh_execution_history()
+            return
+        trees = [self.tree_folders, self.tree_pending, self.tree_ready, self.tree_done]
         if 0 <= tab_idx < len(trees):
             self.active_tree = trees[tab_idx]
             sel = self.active_tree.selection()
