@@ -2137,8 +2137,12 @@ class OCRLibrosApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Auditoría, Diagnóstico, Autocorrección, SQLite y Rollback de Libros Registrales - Claude Sonnet 5")
-        self.geometry("1360x850")
-        self.minsize(1120, 720)
+        self.geometry("1440x920")
+        self.minsize(1180, 750)
+        try:
+            self.state("zoomed")
+        except Exception:
+            pass
 
         self.style = ttk.Style(self)
         try:
@@ -2207,8 +2211,43 @@ class OCRLibrosApp(tk.Tk):
         self.config(menu=menubar)
 
     def _create_widgets(self):
-        main_frame = ttk.Frame(self, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Contenedor raíz con Canvas y Scrollbar Vertical para desplazamiento suave de toda la ventana
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self.v_scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
+        main_frame = ttk.Frame(self.canvas, padding=10)
+
+        main_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas_window_id = self.canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
+
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Ajustar ancho del frame interior al ancho del canvas dinámicamente
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfig(self.canvas_window_id, width=e.width)
+        )
+
+        # Scroll contextual inteligente con la rueda del ratón:
+        def _on_mousewheel(event):
+            widget = event.widget
+            is_tree = False
+            w = widget
+            while w is not None and w != self:
+                if isinstance(w, ttk.Treeview):
+                    is_tree = True
+                    break
+                w = getattr(w, "master", None)
+
+            if not is_tree:
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self.bind_all("<MouseWheel>", _on_mousewheel)
 
         # 1. Encabezado + Botones de Configuración y Rollback
         header_frame = ttk.Frame(main_frame)
@@ -2570,7 +2609,7 @@ class OCRLibrosApp(tk.Tk):
             text=" Listas en Tiempo Real (Al aplicar cambios, cada carpeta pasa automáticamente a su pestaña correspondiente) ",
             padding=4
         )
-        paned.add(master_frame, weight=3)
+        paned.add(master_frame, weight=5)
 
         self.notebook_tabs = ttk.Notebook(master_frame)
         self.notebook_tabs.pack(fill=tk.BOTH, expand=True)
@@ -2624,7 +2663,7 @@ class OCRLibrosApp(tk.Tk):
             "estado_final",
             "sugerido",
         )
-        self.tree_done = ttk.Treeview(done_table_frame, columns=done_cols, show="headings", height=9)
+        self.tree_done = ttk.Treeview(done_table_frame, columns=done_cols, show="headings", height=20)
         self.tree_done.heading("num", text="#")
         self.tree_done.heading("accion", text="Cambio / Acción Aplicada")
         self.tree_done.heading("carpeta_inicial", text="Carpeta Inicial (Antes)")
@@ -2684,7 +2723,7 @@ class OCRLibrosApp(tk.Tk):
             "discrepancias",
             "accion_sugerida",
         )
-        self.tree_audit = ttk.Treeview(audit_table_frame, columns=audit_cols, show="headings", height=9)
+        self.tree_audit = ttk.Treeview(audit_table_frame, columns=audit_cols, show="headings", height=20)
         self.tree_audit.heading("num", text="#")
         self.tree_audit.heading("carpeta", text="Carpeta")
         self.tree_audit.heading("estado_memoria", text="Estado en Memoria / BD")
@@ -3032,7 +3071,7 @@ class OCRLibrosApp(tk.Tk):
             "veredicto",
             "sugerido",
         )
-        tree = ttk.Treeview(parent_frame, columns=master_cols, show="headings", height=9)
+        tree = ttk.Treeview(parent_frame, columns=master_cols, show="headings", height=20)
         tree.heading("num", text="#")
         tree.heading("carpeta", text="Carpeta Actual")
         tree.heading("caratula", text="PDF Carátula (Confirmable)")
