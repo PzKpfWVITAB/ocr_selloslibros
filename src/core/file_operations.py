@@ -4,7 +4,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from src.core.settings_manager import SettingsManager
 from src.database.db_manager import DatabaseManager
@@ -214,6 +214,7 @@ class FileOperations:
         info_page_num: int,
         replaceable_pdfs: List[Dict[str, Any]],
         db_manager: DatabaseManager,
+        mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Reemplaza la página en blanco adjunta en cada PDF listado en 'replaceable_pdfs'
@@ -300,6 +301,18 @@ class FileOperations:
                         hash_origen_inicial=orig_hash,
                         backup_contenido_path=backup_path_str,
                     )
+                    if mysql_manager and getattr(mysql_manager, "enabled", False):
+                        mysql_manager.registrar_trazabilidad_archivo(
+                            tipo_operacion="REEMPLAZO_HOJA_BLANCA",
+                            archivo_nombre_origen=pdf_file.name,
+                            archivo_nombre_destino=pdf_file.name,
+                            carpeta_origen=str(folder),
+                            carpeta_destino=str(folder),
+                            ruta_completa_origen=str(pdf_file.resolve()),
+                            ruta_completa_destino=str(pdf_file.resolve()),
+                            hash_sha256=new_hash,
+                            numero_paginas=num_pages,
+                        )
                     replaced_count += 1
                 except Exception as exc:
                     errors.append(f"{pdf_file.name}: {exc}")
@@ -317,6 +330,7 @@ class FileOperations:
         folder_path: Any,
         clean_base_code: str,
         db_manager: DatabaseManager,
+        mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Renombra los PDFs internos con 'clean_base_code' (hasta el año, SIN _2/_3) y
@@ -394,6 +408,18 @@ class FileOperations:
                 numero_paginas=pages_cnt,
                 hash_origen_inicial=file_hash,
             )
+            if mysql_manager and getattr(mysql_manager, "enabled", False):
+                mysql_manager.registrar_trazabilidad_archivo(
+                    tipo_operacion="RENOMBRADO",
+                    archivo_nombre_origen=item["old_name"],
+                    archivo_nombre_destino=item["new_name"],
+                    carpeta_origen=str(folder),
+                    carpeta_destino=str(target_folder_path),
+                    ruta_completa_origen=str(item["old_abs_path"]),
+                    ruta_completa_destino=str(final_pdf_path),
+                    hash_sha256=file_hash,
+                    numero_paginas=pages_cnt,
+                )
             logged_files += 1
 
         collision_applied = target_folder_path.name != clean_base_code
@@ -444,6 +470,7 @@ class FileOperations:
         db_manager: DatabaseManager,
         tipo_movimiento: str = "APARTADO_CARATULA_BLANCA",
         error_subfolder: Optional[str] = "CARATULA EN BLANCO",
+        mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Mueve una carpeta completa al directorio destino especificado.
@@ -505,6 +532,18 @@ class FileOperations:
                 numero_paginas=n_pages,
                 hash_origen_inicial=f_hash,
             )
+            if mysql_manager and getattr(mysql_manager, "enabled", False):
+                mysql_manager.registrar_trazabilidad_archivo(
+                    tipo_operacion=tipo_movimiento,
+                    archivo_nombre_origen=item["old_name"],
+                    archivo_nombre_destino=item["new_name"],
+                    carpeta_origen=str(folder),
+                    carpeta_destino=str(target_folder_path),
+                    ruta_completa_origen=str(item["old_path"]),
+                    ruta_completa_destino=str(final_file_path),
+                    hash_sha256=f_hash,
+                    numero_paginas=n_pages,
+                )
             moved_count += 1
 
         return {
@@ -539,6 +578,7 @@ class FileOperations:
         cls,
         candidate: Dict[str, Any],
         db_manager: DatabaseManager,
+        mysql_manager: Optional[Any] = None,
     ) -> Tuple[bool, str]:
         """
         Restaura un archivo individual exactamente a como estaba antes del primer cambio:
@@ -570,6 +610,13 @@ class FileOperations:
                 if not curr_path.exists():
                     if init_path.exists():
                         db_manager.mark_file_reverted(init_path)
+                        if mysql_manager and getattr(mysql_manager, "enabled", False):
+                            mysql_manager.registrar_rollback_archivo(
+                                archivo_nombre_revertido=init_path.name,
+                                ruta_origen_restaurada=str(init_path),
+                                hash_sha256=candidate.get("hash_origen_inicial", ""),
+                                numero_paginas=candidate.get("numero_paginas", 0)
+                            )
                         return True, f"Ya se encontraba en su ruta inicial: {init_path.name}"
                     return False, f"No se encontró el archivo actual en: {curr_path}"
 
@@ -598,6 +645,14 @@ class FileOperations:
             expected_hash = candidate.get("hash_origen_inicial", "")
             db_manager.mark_file_reverted(init_path)
 
+            if mysql_manager and getattr(mysql_manager, "enabled", False):
+                mysql_manager.registrar_rollback_archivo(
+                    archivo_nombre_revertido=init_path.name,
+                    ruta_origen_restaurada=str(init_path),
+                    hash_sha256=restored_hash,
+                    numero_paginas=candidate.get("numero_paginas", 0)
+                )
+
             if expected_hash and restored_hash != expected_hash:
                 return (
                     True,
@@ -612,6 +667,7 @@ class FileOperations:
         cls,
         initial_folder_path: Any,
         db_manager: DatabaseManager,
+        mysql_manager: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Revierte todos los archivos pertenecientes a una carpeta original a su punto inicial
@@ -623,7 +679,7 @@ class FileOperations:
         details: List[str] = []
 
         for cand in candidates:
-            ok, msg = cls.rollback_single_candidate(cand, db_manager)
+            ok, msg = cls.rollback_single_candidate(cand, db_manager, mysql_manager)
             if ok:
                 restored += 1
                 details.append(msg)
@@ -639,7 +695,11 @@ class FileOperations:
         }
 
     @classmethod
-    def rollback_all_to_initial_state(cls, db_manager: DatabaseManager) -> Dict[str, Any]:
+    def rollback_all_to_initial_state(
+        cls,
+        db_manager: DatabaseManager,
+        mysql_manager: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         """
         Revierte absolutamente todos los archivos con cambios activos en la base de datos
         a su estado y ubicación original antes del primer cambio.
@@ -649,7 +709,7 @@ class FileOperations:
         errors: List[str] = []
 
         for cand in candidates:
-            ok, msg = cls.rollback_single_candidate(cand, db_manager)
+            ok, msg = cls.rollback_single_candidate(cand, db_manager, mysql_manager)
             if ok:
                 restored += 1
             else:

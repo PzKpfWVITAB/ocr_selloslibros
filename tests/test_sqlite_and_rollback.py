@@ -2,7 +2,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from src.database.db_manager import DatabaseManager
 from src.core.caratula_inspector import CaratulaInspector
@@ -533,6 +533,90 @@ class TestSQLiteCaratulaAndRollback(unittest.TestCase):
 
         # El comentario debe estar aislado como observación informativa, sin contaminar datos
         self.assertTrue(any(ev.startswith("💬 Observación IA:") for ev in parsed["evidencias"]))
+
+    def test_10_executive_statistics_and_traceability_matrix(self):
+        """
+        Verifica el dimensionamiento de Volumetría (Carpetas, PDFs e Imágenes)
+        y la generación de la matriz de trazabilidad cruzada (Original vs Final).
+        """
+        # 1. Registrar una detección con veredicto COINCIDE_TOTAL (Bien)
+        diag_ok = {
+            "folder_path": str(self.temp_dir / "01_01_01_01_00_00_1990"),
+            "folder_data": {"folder_name": "01_01_01_01_00_00_1990", "delegacion": "01", "seccion_raw": "01", "libro_raw": "01", "tomo_raw": "01", "volumen_raw": "00", "fraccionamiento_raw": "00", "anio_raw": "1990"},
+            "caratula_inspection": {
+                "caratula_filename": "01_01_01_01_00_00_1990_CARATULA_00.pdf",
+                "status": "OK_CON_INFO",
+                "info_page_num": 1,
+                "all_pdfs_have_caratula": True,
+                "total_regular_pdfs": 10,
+                "total_pages_in_folder": 25,  # 25 imágenes
+                "pdfs_with_info_page": 10,
+                "pdfs_with_blank_page": 0,
+                "pdfs_missing_caratula": []
+            },
+            "ocr_consolidado": {"seccion": 1, "libro": 1, "tomo": 1, "volumen": 0, "fraccionamiento": "00", "anio": 1990, "evidencias_globales": []},
+            "veredicto_global": "COINCIDE_TOTAL",
+            "codigo_base_sugerido": "01_01_01_01_00_00_1990"
+        }
+        self.db.save_detection(diag_ok)
+
+        # 2. Registrar una detección con veredicto DISCREPANCIA (Mal)
+        diag_bad = {
+            "folder_path": str(self.temp_dir / "01_01_02_01_00_00_1985"),
+            "folder_data": {"folder_name": "01_01_02_01_00_00_1985", "delegacion": "01", "seccion_raw": "01", "libro_raw": "02", "tomo_raw": "01", "volumen_raw": "00", "fraccionamiento_raw": "00", "anio_raw": "1985"},
+            "caratula_inspection": {
+                "caratula_filename": "01_01_02_01_00_00_1985_CARATULA_00.pdf",
+                "status": "REEMPLAZABLE_HOJA_BLANCA",
+                "info_page_num": 1,
+                "all_pdfs_have_caratula": True,
+                "total_regular_pdfs": 5,
+                "total_pages_in_folder": 15,  # 15 imágenes
+                "pdfs_with_info_page": 0,
+                "pdfs_with_blank_page": 5,
+                "pdfs_missing_caratula": []
+            },
+            "ocr_consolidado": {"seccion": 1, "libro": 2, "tomo": 3, "volumen": 0, "fraccionamiento": "00", "anio": 1985, "evidencias_globales": []},
+            "veredicto_global": "DISCREPANCIA_TOMO",
+            "codigo_base_sugerido": "01_01_02_03_00_00_1985"
+        }
+        self.db.save_detection(diag_bad)
+
+        # 3. Registrar un movimiento físico
+        self.db.log_file_movement(
+            tipo_movimiento="RENOMBRADO",
+            ruta_anterior=self.temp_dir / "ORIG" / "archivo_01.pdf",
+            ruta_nueva=self.temp_dir / "DEST" / "archivo_01_renombrado.pdf",
+            nombre_anterior="archivo_01.pdf",
+            nombre_nuevo="archivo_01_renombrado.pdf",
+            hash_actual="hash123",
+            numero_paginas=3,
+            hash_origen_inicial="hash123"
+        )
+
+        # 4. Obtener estadísticas ejecutivas
+        stats = self.db.get_executive_statistics()
+        self.assertEqual(stats["total_carpetas"], 2)
+        self.assertEqual(stats["carpetas_bien"], 1)
+        self.assertEqual(stats["carpetas_mal"], 1)
+        self.assertEqual(stats["pct_carpetas_bien"], 50.0)
+        self.assertEqual(stats["total_pdfs"], 15)
+        self.assertEqual(stats["pdfs_bien"], 10)
+        self.assertEqual(stats["pdfs_mal"], 5)
+        self.assertEqual(stats["total_imagenes"], 40)  # 25 + 15
+        self.assertEqual(stats["imagenes_bien"], 25)
+        self.assertEqual(stats["imagenes_mal"], 15)
+        self.assertEqual(stats["pct_imagenes_bien"], 62.5)
+        self.assertEqual(stats["archivos_modificados"], 1)
+
+        # 5. Obtener matriz de comparativa
+        comparison = self.db.get_traceability_comparison()
+        self.assertEqual(len(comparison), 1)
+        item = comparison[0]
+        self.assertEqual(item["nombre_origen"], "archivo_01.pdf")
+        self.assertEqual(item["nombre_actual"], "archivo_01_renombrado.pdf")
+        self.assertEqual(item["numero_paginas"], 3)
+        self.assertTrue(item["ha_cambiado"])
+        self.assertEqual(item["estado_str"], "MODIFICADO")
 
 
 if __name__ == "__main__":

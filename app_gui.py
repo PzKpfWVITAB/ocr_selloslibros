@@ -6,8 +6,10 @@ import os
 import subprocess
 import sys
 import threading
+import csv
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Set
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -199,6 +201,12 @@ class RollbackAndDatabaseDialog(tk.Toplevel):
         ).pack(side=tk.LEFT)
 
         ttk.Button(top_bar, text="🔄 Actualizar Tablas", command=self.refresh_all_tabs).pack(side=tk.RIGHT)
+        ttk.Button(
+            top_bar,
+            text="📊 Dashboard Estadístico & Trazabilidad",
+            style="Primary.TButton",
+            command=self._open_stats_dashboard
+        ).pack(side=tk.RIGHT, padx=(0, 8))
 
         self.notebook = ttk.Notebook(container)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -535,6 +543,750 @@ class RollbackAndDatabaseDialog(tk.Toplevel):
                 f"Se restauraron intactos los {res['restored_count']} archivos a su ubicación y estado inicial.",
                 parent=self
             )
+
+    def _open_stats_dashboard(self):
+        ExecutiveTraceabilityDashboardDialog(self.parent_app)
+
+
+class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
+    """
+    Dashboard Ejecutivo y Centro de Estadísticas Registrales:
+    - Permite dimensionar y cruzar el estado inicial vs final de carpetas y PDFs.
+    - Cuantifica el volumen de digitalización en Carpetas, Archivos PDF y su equivalencia en IMÁGENES (páginas).
+    - Permite comparar ruta original, nombre original, ruta final y nombre final.
+    - Exporta reportes ejecutivos consolidados a CSV / Excel para Finanzas y supervisión.
+    """
+
+    def __init__(self, parent: "OCRLibrosApp"):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.service = parent.service
+        self.title("📊 Dashboard Ejecutivo: Estadísticas y Trazabilidad (Original vs Final)")
+        self.geometry("1260x780")
+        self.minsize(1050, 650)
+        self.transient(parent)
+
+        self.source_var = tk.StringVar(value="MEMORIA" if parent.all_folder_items else "SQLITE")
+        self.search_var = tk.StringVar(value="")
+        self.active_filter = "TODOS"
+
+        self.comparison_items: List[Dict[str, Any]] = []
+        self.filtered_items: List[Dict[str, Any]] = []
+        self.stats_data: Dict[str, Any] = {}
+
+        self._build_ui()
+        self.refresh_data()
+
+    def _build_ui(self):
+        container = ttk.Frame(self, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Barra Superior de Control y Fuente de Datos
+        top_bar = ttk.Frame(container)
+        top_bar.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            top_bar,
+            text="Fuente de Datos:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        r_mem = ttk.Radiobutton(
+            top_bar,
+            text="📌 Sesión en Vivo (Lote en Pantalla)",
+            variable=self.source_var,
+            value="MEMORIA",
+            command=self.refresh_data
+        )
+        r_mem.pack(side=tk.LEFT, padx=(0, 6))
+
+        r_sql = ttk.Radiobutton(
+            top_bar,
+            text="🗄️ SQLite Local (auditoria_libros.db)",
+            variable=self.source_var,
+            value="SQLITE",
+            command=self.refresh_data
+        )
+        r_sql.pack(side=tk.LEFT, padx=(0, 6))
+
+        mysql_on = bool(self.service.mysql and self.service.mysql.enabled)
+        r_my = ttk.Radiobutton(
+            top_bar,
+            text="🐬 Servidor MySQL (trazabilidad_selloslibros)" if mysql_on else "🐬 MySQL (Inactivo)",
+            variable=self.source_var,
+            value="MYSQL",
+            command=self.refresh_data,
+            state=tk.NORMAL if mysql_on else tk.DISABLED
+        )
+        r_my.pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Button(
+            top_bar,
+            text="🔄 Actualizar Estadísticas",
+            command=self.refresh_data
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            top_bar,
+            text="📥 Exportar Reporte Ejecutivo (CSV / Excel)",
+            style="Primary.TButton",
+            command=self.export_csv
+        ).pack(side=tk.RIGHT)
+
+        # 2. Panel Superior de Tarjetas KPI / Dimensionamiento
+        kpi_frame = ttk.Frame(container)
+        kpi_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Tarjeta 1: Carpetas
+        card1 = tk.Frame(kpi_frame, bg="#eff6ff", bd=1, relief=tk.SOLID, padx=10, pady=8)
+        card1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        tk.Label(card1, text="📁 CARPETAS REGISTRALES", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#eff6ff").pack(anchor=tk.W)
+        self.lbl_carp_total = tk.Label(card1, text="Total: 0", font=("Segoe UI", 12, "bold"), fg="#1e293b", bg="#eff6ff")
+        self.lbl_carp_total.pack(anchor=tk.W, pady=(2, 0))
+        self.lbl_carp_bien = tk.Label(card1, text="✔ Concluidas: 0 (0.0%)", font=("Segoe UI", 9, "bold"), fg="#16a34a", bg="#eff6ff")
+        self.lbl_carp_bien.pack(anchor=tk.W)
+        self.lbl_carp_mal = tk.Label(card1, text="⚠ En Revisión / Discrepancia: 0 (0.0%)", font=("Segoe UI", 9), fg="#dc2626", bg="#eff6ff")
+        self.lbl_carp_mal.pack(anchor=tk.W)
+
+        # Tarjeta 2: Archivos PDF
+        card2 = tk.Frame(kpi_frame, bg="#f0fdf4", bd=1, relief=tk.SOLID, padx=10, pady=8)
+        card2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        tk.Label(card2, text="📄 ARCHIVOS PDF", font=("Segoe UI", 9, "bold"), fg="#166534", bg="#f0fdf4").pack(anchor=tk.W)
+        self.lbl_pdf_total = tk.Label(card2, text="Total PDFs: 0", font=("Segoe UI", 12, "bold"), fg="#1e293b", bg="#f0fdf4")
+        self.lbl_pdf_total.pack(anchor=tk.W, pady=(2, 0))
+        self.lbl_pdf_bien = tk.Label(card2, text="✔ En Expedientes Correctos: 0", font=("Segoe UI", 9, "bold"), fg="#16a34a", bg="#f0fdf4")
+        self.lbl_pdf_bien.pack(anchor=tk.W)
+        self.lbl_pdf_mal = tk.Label(card2, text="⚠ Con Incidencias / Apartados: 0", font=("Segoe UI", 9), fg="#dc2626", bg="#f0fdf4")
+        self.lbl_pdf_mal.pack(anchor=tk.W)
+        self.lbl_pdf_mod = tk.Label(card2, text="🔄 Con Movimiento Registrado: 0", font=("Segoe UI", 8), fg="#0284c7", bg="#f0fdf4")
+        self.lbl_pdf_mod.pack(anchor=tk.W)
+
+        # Tarjeta 3: Imágenes / Fojas (Páginas Digitalizadas)
+        card3 = tk.Frame(kpi_frame, bg="#fefce8", bd=1, relief=tk.SOLID, padx=10, pady=8)
+        card3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        tk.Label(card3, text="🖼️ IMÁGENES / FOJAS (PÁGINAS)", font=("Segoe UI", 9, "bold"), fg="#854d0e", bg="#fefce8").pack(anchor=tk.W)
+        self.lbl_img_total = tk.Label(card3, text="Total Imágenes: 0", font=("Segoe UI", 12, "bold"), fg="#1e293b", bg="#fefce8")
+        self.lbl_img_total.pack(anchor=tk.W, pady=(2, 0))
+        self.lbl_img_bien = tk.Label(card3, text="✔ Validadas (Bien): 0 (0.0%)", font=("Segoe UI", 9, "bold"), fg="#16a34a", bg="#fefce8")
+        self.lbl_img_bien.pack(anchor=tk.W)
+        self.lbl_img_mal = tk.Label(card3, text="⚠ En Revisión (Mal): 0 (0.0%)", font=("Segoe UI", 9), fg="#dc2626", bg="#fefce8")
+        self.lbl_img_mal.pack(anchor=tk.W)
+        self.lbl_img_prom = tk.Label(card3, text="📐 Promedio: 0.0 págs / carpeta", font=("Segoe UI", 8), fg="#475569", bg="#fefce8")
+        self.lbl_img_prom.pack(anchor=tk.W)
+
+        # Tarjeta 4: Rendimiento y Salud Registral
+        card4 = tk.Frame(kpi_frame, bg="#f5f3ff", bd=1, relief=tk.SOLID, padx=10, pady=8)
+        card4.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(card4, text="🎯 SALUD REGISTRAL", font=("Segoe UI", 9, "bold"), fg="#5b21b6", bg="#f5f3ff").pack(anchor=tk.W)
+        self.lbl_salud_pct = tk.Label(card4, text="Salud Carpetas: 0.0%", font=("Segoe UI", 12, "bold"), fg="#1e293b", bg="#f5f3ff")
+        self.lbl_salud_pct.pack(anchor=tk.W, pady=(2, 0))
+        self.lbl_vol_pct = tk.Label(card4, text="Volumen Fojas OK: 0.0%", font=("Segoe UI", 9, "bold"), fg="#16a34a", bg="#f5f3ff")
+        self.lbl_vol_pct.pack(anchor=tk.W)
+        self.lbl_db_status = tk.Label(card4, text="Trazabilidad Activa", font=("Segoe UI", 8), fg="#475569", bg="#f5f3ff")
+        self.lbl_db_status.pack(anchor=tk.W)
+
+        # 3. Pestañas Principales: 1. Desglose de Volumetría | 2. Comparativa Cruzada (Original vs Final)
+        self.notebook = ttk.Notebook(container)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        tab_vol = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab_vol, text=" 📊 1. Desglose de Volumetría y Categorías (Carpetas, PDFs e Imágenes) ")
+
+        tab_comp = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab_comp, text=" 🔄 2. Matriz de Trazabilidad Cruzada: Original vs Final (Archivo por Archivo) ")
+
+        # --- CONTENIDO PESTAÑA 1 (VOLUMETRÍA) ---
+        paned_vol = ttk.PanedWindow(tab_vol, orient=tk.VERTICAL)
+        paned_vol.pack(fill=tk.BOTH, expand=True)
+
+        top_vol_frame = ttk.Frame(paned_vol)
+        paned_vol.add(top_vol_frame, weight=3)
+
+        # Desglose Veredictos (Izquierda)
+        f_ver = ttk.LabelFrame(top_vol_frame, text=" Desglose por Diagnóstico / Veredicto Registral ", padding=6)
+        f_ver.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+
+        ver_cols = ("veredicto", "carpetas", "pdfs", "imagenes", "pct", "estado")
+        self.tree_ver = ttk.Treeview(f_ver, columns=ver_cols, show="headings", height=8)
+        self.tree_ver.heading("veredicto", text="Veredicto / Diagnóstico")
+        self.tree_ver.heading("carpetas", text="Carpetas")
+        self.tree_ver.heading("pdfs", text="PDFs")
+        self.tree_ver.heading("imagenes", text="Imágenes (Fojas)")
+        self.tree_ver.heading("pct", text="% Lote")
+        self.tree_ver.heading("estado", text="Condición")
+
+        self.tree_ver.column("veredicto", width=200, anchor=tk.W)
+        self.tree_ver.column("carpetas", width=75, anchor=tk.CENTER)
+        self.tree_ver.column("pdfs", width=75, anchor=tk.CENTER)
+        self.tree_ver.column("imagenes", width=110, anchor=tk.CENTER)
+        self.tree_ver.column("pct", width=65, anchor=tk.CENTER)
+        self.tree_ver.column("estado", width=115, anchor=tk.CENTER)
+
+        sc_ver = ttk.Scrollbar(f_ver, orient=tk.VERTICAL, command=self.tree_ver.yview)
+        self.tree_ver.configure(yscrollcommand=sc_ver.set)
+        self.tree_ver.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_ver.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Desglose Carátula (Derecha)
+        f_car = ttk.LabelFrame(top_vol_frame, text=" Desglose por Estado de Carátula y Sellos ", padding=6)
+        f_car.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        car_cols = ("estado_car", "carpetas", "pdfs", "imagenes", "accion")
+        self.tree_car = ttk.Treeview(f_car, columns=car_cols, show="headings", height=8)
+        self.tree_car.heading("estado_car", text="Estado Carátula")
+        self.tree_car.heading("carpetas", text="Carpetas")
+        self.tree_car.heading("pdfs", text="PDFs")
+        self.tree_car.heading("imagenes", text="Imágenes (Fojas)")
+        self.tree_car.heading("accion", text="Acción Registral")
+
+        self.tree_car.column("estado_car", width=190, anchor=tk.W)
+        self.tree_car.column("carpetas", width=75, anchor=tk.CENTER)
+        self.tree_car.column("pdfs", width=75, anchor=tk.CENTER)
+        self.tree_car.column("imagenes", width=110, anchor=tk.CENTER)
+        self.tree_car.column("accion", width=130, anchor=tk.CENTER)
+
+        sc_car = ttk.Scrollbar(f_car, orient=tk.VERTICAL, command=self.tree_car.yview)
+        self.tree_car.configure(yscrollcommand=sc_car.set)
+        self.tree_car.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_car.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Desglose Movimientos Físicos (Abajo)
+        bot_vol_frame = ttk.LabelFrame(paned_vol, text=" Registro de Operaciones y Movimientos Físicos Aplicados ", padding=6)
+        paned_vol.add(bot_vol_frame, weight=2)
+
+        mov_cols = ("tipo", "archivos", "paginas", "descripcion")
+        self.tree_mov_stat = ttk.Treeview(bot_vol_frame, columns=mov_cols, show="headings", height=5)
+        self.tree_mov_stat.heading("tipo", text="Tipo de Operación")
+        self.tree_mov_stat.heading("archivos", text="Archivos Involucrados")
+        self.tree_mov_stat.heading("paginas", text="Imágenes / Fojas Modificadas")
+        self.tree_mov_stat.heading("descripcion", text="Impacto Forense")
+
+        self.tree_mov_stat.column("tipo", width=220, anchor=tk.W)
+        self.tree_mov_stat.column("archivos", width=150, anchor=tk.CENTER)
+        self.tree_mov_stat.column("paginas", width=190, anchor=tk.CENTER)
+        self.tree_mov_stat.column("descripcion", width=340, anchor=tk.W)
+
+        sc_mov = ttk.Scrollbar(bot_vol_frame, orient=tk.VERTICAL, command=self.tree_mov_stat.yview)
+        self.tree_mov_stat.configure(yscrollcommand=sc_mov.set)
+        self.tree_mov_stat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_mov.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # --- CONTENIDO PESTAÑA 2 (COMPARATIVA ORIGINAL VS FINAL) ---
+        filter_bar = ttk.Frame(tab_comp)
+        filter_bar.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(filter_bar, text="🔍 Buscar:").pack(side=tk.LEFT, padx=(0, 4))
+        ent_search = ttk.Entry(filter_bar, textvariable=self.search_var, width=28)
+        ent_search.pack(side=tk.LEFT, padx=(0, 10))
+        self.search_var.trace_add("write", lambda *args: self._apply_filter())
+
+        ttk.Label(filter_bar, text="Filtro Rápido:").pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_f_all = ttk.Button(filter_bar, text="Todos", command=lambda: self._set_filter("TODOS"))
+        self.btn_f_all.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_f_mod = ttk.Button(filter_bar, text="Solo Modificados", command=lambda: self._set_filter("MODIFICADOS"))
+        self.btn_f_mod.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_f_disc = ttk.Button(filter_bar, text="Solo con Discrepancia", command=lambda: self._set_filter("DISCREPANCIA"))
+        self.btn_f_disc.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_f_ok = ttk.Button(filter_bar, text="Solo Concluidos", command=lambda: self._set_filter("CONCLUIDOS"))
+        self.btn_f_ok.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.lbl_filter_count = ttk.Label(filter_bar, text="Cargando registros...", font=("Segoe UI", 9, "bold"), foreground="#0369a1")
+        self.lbl_filter_count.pack(side=tk.RIGHT)
+
+        paned_comp = ttk.PanedWindow(tab_comp, orient=tk.VERTICAL)
+        paned_comp.pack(fill=tk.BOTH, expand=True)
+
+        tree_frame = ttk.Frame(paned_comp)
+        paned_comp.add(tree_frame, weight=4)
+
+        comp_cols = (
+            "num", "orig_name", "orig_folder", "dest_name", "dest_folder",
+            "pages", "estado", "operacion", "hash_orig", "hash_dest", "fecha"
+        )
+        self.tree_comp = ttk.Treeview(tree_frame, columns=comp_cols, show="headings", selectmode="browse")
+        self.tree_comp.heading("num", text="#")
+        self.tree_comp.heading("orig_name", text="Archivo Original")
+        self.tree_comp.heading("orig_folder", text="Carpeta Original")
+        self.tree_comp.heading("dest_name", text="Archivo Final / Actual")
+        self.tree_comp.heading("dest_folder", text="Carpeta Final / Actual")
+        self.tree_comp.heading("pages", text="Págs")
+        self.tree_comp.heading("estado", text="Estado")
+        self.tree_comp.heading("operacion", text="Operación Aplicada")
+        self.tree_comp.heading("hash_orig", text="Hash SHA-256 Inicial")
+        self.tree_comp.heading("hash_dest", text="Hash Actual")
+        self.tree_comp.heading("fecha", text="Fecha")
+
+        self.tree_comp.column("num", width=42, anchor=tk.CENTER, stretch=False)
+        self.tree_comp.column("orig_name", width=220, anchor=tk.W)
+        self.tree_comp.column("orig_folder", width=190, anchor=tk.W)
+        self.tree_comp.column("dest_name", width=220, anchor=tk.W)
+        self.tree_comp.column("dest_folder", width=190, anchor=tk.W)
+        self.tree_comp.column("pages", width=55, anchor=tk.CENTER, stretch=False)
+        self.tree_comp.column("estado", width=110, anchor=tk.CENTER)
+        self.tree_comp.column("operacion", width=180, anchor=tk.W)
+        self.tree_comp.column("hash_orig", width=110, anchor=tk.CENTER)
+        self.tree_comp.column("hash_dest", width=110, anchor=tk.CENTER)
+        self.tree_comp.column("fecha", width=120, anchor=tk.CENTER)
+
+        self.tree_comp.tag_configure("modificado", background="#f0fdf4", foreground="#166534")
+        self.tree_comp.tag_configure("discrepancia", background="#fef2f2", foreground="#991b1b")
+        self.tree_comp.tag_configure("intacto", background="#ffffff", foreground="#334155")
+
+        sc_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree_comp.yview)
+        sc_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree_comp.xview)
+        self.tree_comp.configure(yscrollcommand=sc_y.set, xscrollcommand=sc_x.set)
+
+        self.tree_comp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_y.pack(side=tk.RIGHT, fill=tk.Y)
+        sc_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.tree_comp.bind("<<TreeviewSelect>>", self._on_comparison_row_selected)
+
+        # Panel de Detalle Inferior
+        det_frame = ttk.LabelFrame(paned_comp, text=" Detalle Forense del Archivo Seleccionado (Contraste Original vs Final) ", padding=6)
+        paned_comp.add(det_frame, weight=1)
+
+        self.txt_comp_detail = tk.Text(det_frame, font=("Consolas", 9), height=5, wrap=tk.WORD, bg="#f8fafc")
+        sc_det = ttk.Scrollbar(det_frame, orient=tk.VERTICAL, command=self.txt_comp_detail.yview)
+        self.txt_comp_detail.configure(yscrollcommand=sc_det.set)
+        self.txt_comp_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_det.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _set_filter(self, filter_name: str):
+        self.active_filter = filter_name
+        self._apply_filter()
+
+    def _on_comparison_row_selected(self, event=None):
+        sel = self.tree_comp.selection()
+        if not sel:
+            return
+        item_data = None
+        try:
+            row_idx = int(self.tree_comp.item(sel[0], "values")[0]) - 1
+            if 0 <= row_idx < len(self.filtered_items):
+                item_data = self.filtered_items[row_idx]
+        except Exception:
+            pass
+
+        if not item_data:
+            return
+
+        detail_text = (
+            f"=== CONTRASTE DE TRAZABILIDAD REGISTRAL ===\n"
+            f"[ORIGINAL INICIAL]  Nombre: {item_data.get('nombre_origen')} | Carpeta: {item_data.get('carpeta_origen')}\n"
+            f"                    Ruta:   {item_data.get('ruta_origen')}\n"
+            f"                    Hash SHA-256 Inicial: {item_data.get('hash_inicial')}\n"
+            f"--------------------------------------------------------------------------------------------------------\n"
+            f"[DESTINO / ACTUAL]  Nombre: {item_data.get('nombre_actual')} | Carpeta: {item_data.get('carpeta_actual')}\n"
+            f"                    Ruta:   {item_data.get('ruta_actual')}\n"
+            f"                    Hash SHA-256 Actual:  {item_data.get('hash_actual')}\n"
+            f"--------------------------------------------------------------------------------------------------------\n"
+            f"[VOLUMETRÍA]        Páginas / Imágenes Equivalentes: {item_data.get('numero_paginas')} foja(s)\n"
+            f"[OPERACIÓN]         {item_data.get('tipos_movimiento')} | Fecha: {item_data.get('fecha_ultimo_movimiento')} | Estado: {item_data.get('estado_str')}\n"
+        )
+        self.txt_comp_detail.delete("1.0", tk.END)
+        self.txt_comp_detail.insert(tk.END, detail_text)
+
+    def refresh_data(self):
+        source = self.source_var.get()
+        if source == "MEMORIA":
+            self.stats_data, self.comparison_items = self._load_memory_data()
+            db_label = f"Sesión en Vivo: {len(self.parent_app.all_folder_items)} carpetas"
+        elif source == "MYSQL":
+            self.stats_data = self.service.mysql.get_executive_statistics() if self.service.mysql else {}
+            self.comparison_items = self.service.mysql.get_traceability_comparison() if self.service.mysql else []
+            db_label = "MySQL Server: trazabilidad_selloslibros"
+        else:
+            self.stats_data = self.service.db.get_executive_statistics()
+            self.comparison_items = self.service.db.get_traceability_comparison()
+            db_label = "SQLite Local: auditoria_libros.db"
+
+        # 1. Actualizar Tarjetas KPI
+        t_carp = self.stats_data.get("total_carpetas", 0)
+        c_bien = self.stats_data.get("carpetas_bien", 0)
+        c_mal = self.stats_data.get("carpetas_mal", 0)
+        p_carp_bien = self.stats_data.get("pct_carpetas_bien", 0.0)
+        p_carp_mal = round(100.0 - p_carp_bien, 1) if t_carp > 0 else 0.0
+
+        self.lbl_carp_total.config(text=f"Total: {t_carp:,}")
+        self.lbl_carp_bien.config(text=f"✔ Concluidas: {c_bien:,} ({p_carp_bien}%)")
+        self.lbl_carp_mal.config(text=f"⚠ En Revisión / Discrepancia: {c_mal:,} ({p_carp_mal}%)")
+
+        t_pdf = self.stats_data.get("total_pdfs", 0)
+        pdf_bien = self.stats_data.get("pdfs_bien", 0)
+        pdf_mal = self.stats_data.get("pdfs_mal", 0)
+        pdf_mod = self.stats_data.get("archivos_modificados", 0)
+
+        self.lbl_pdf_total.config(text=f"Total PDFs: {t_pdf:,}")
+        self.lbl_pdf_bien.config(text=f"✔ En Expedientes Correctos: {pdf_bien:,}")
+        self.lbl_pdf_mal.config(text=f"⚠ Con Incidencias / Apartados: {pdf_mal:,}")
+        self.lbl_pdf_mod.config(text=f"🔄 Con Movimiento Registrado: {pdf_mod:,}")
+
+        t_img = self.stats_data.get("total_imagenes", 0)
+        img_bien = self.stats_data.get("imagenes_bien", 0)
+        img_mal = self.stats_data.get("imagenes_mal", 0)
+        p_img_bien = self.stats_data.get("pct_imagenes_bien", 0.0)
+        p_img_mal = round(100.0 - p_img_bien, 1) if t_img > 0 else 0.0
+        prom_img = self.stats_data.get("promedio_img_carpeta", 0.0)
+
+        self.lbl_img_total.config(text=f"Total Imágenes: {t_img:,}")
+        self.lbl_img_bien.config(text=f"✔ Validadas (Bien): {img_bien:,} ({p_img_bien}%)")
+        self.lbl_img_mal.config(text=f"⚠ En Revisión (Mal): {img_mal:,} ({p_img_mal}%)")
+        self.lbl_img_prom.config(text=f"📐 Promedio: {prom_img} imágenes / carpeta")
+
+        self.lbl_salud_pct.config(text=f"Salud Carpetas: {p_carp_bien}%")
+        self.lbl_vol_pct.config(text=f"Volumen Fojas OK: {p_img_bien}%")
+        self.lbl_db_status.config(text=db_label)
+
+        # 2. Actualizar Tabla de Veredictos (Pestaña 1)
+        for item in self.tree_ver.get_children():
+            self.tree_ver.delete(item)
+        desglose_v = self.stats_data.get("desglose_veredicto", {})
+        for v_name, counts in sorted(desglose_v.items(), key=lambda x: x[1].get("carpetas", 0), reverse=True):
+            carp = counts.get("carpetas", 0)
+            pdfs = counts.get("pdfs", 0)
+            imgs = counts.get("imagenes", 0)
+            pct = round(carp / t_carp * 100, 1) if t_carp > 0 else 0.0
+            cond = "✔ Concluido" if "COINCIDE" in v_name or "CORRECTOS" in v_name else "⚠ Requiere Revisión"
+            self.tree_ver.insert("", tk.END, values=(v_name, carp, pdfs, imgs, f"{pct}%", cond))
+
+        # 3. Actualizar Tabla de Carátulas (Pestaña 1)
+        for item in self.tree_car.get_children():
+            self.tree_car.delete(item)
+        desglose_c = self.stats_data.get("desglose_caratula", {})
+        for c_name, counts in sorted(desglose_c.items(), key=lambda x: x[1].get("carpetas", 0), reverse=True):
+            carp = counts.get("carpetas", 0)
+            pdfs = counts.get("pdfs", 0)
+            imgs = counts.get("imagenes", 0)
+            if c_name == "OK_CON_INFO":
+                act = "✔ Sello con Datos"
+            elif c_name == "REEMPLAZABLE_HOJA_BLANCA":
+                act = "🛠 Hoja Blanca Sustituible"
+            elif c_name == "TOTALMENTE_BLANCA":
+                act = "📦 Apartar (Sin Datos)"
+            elif c_name == "PDFS_SIN_CARATULA":
+                act = "⚠ Apartar (Incompletos)"
+            else:
+                act = "Diagnóstico Pendiente"
+            self.tree_car.insert("", tk.END, values=(c_name, carp, pdfs, imgs, act))
+
+        # 4. Actualizar Tabla de Movimientos Físicos (Pestaña 1)
+        for item in self.tree_mov_stat.get_children():
+            self.tree_mov_stat.delete(item)
+        mov_types = self.stats_data.get("desglose_movimientos", [])
+        for m in mov_types:
+            t = m.get("tipo_movimiento") or "DESCONOCIDO"
+            archs = m.get("cantidad", 0)
+            pags = m.get("paginas", 0)
+            if "RENOMBRADO" in t:
+                desc = "Actualización de nombre físico de carpetas y PDFs"
+            elif "REEMPLAZO" in t:
+                desc = "Sustitución física de hoja en blanco por carátula oficial"
+            elif "APARTADO" in t:
+                desc = "Traslado a subcarpeta de error para auditoría"
+            elif "SEPARACION" in t:
+                desc = "Separación de libros mezclados en nuevas carpetas"
+            else:
+                desc = "Movimiento físico registrado con hash SHA-256"
+            self.tree_mov_stat.insert("", tk.END, values=(t, f"{archs} archivo(s)", f"{pags} foja(s) / imagen(es)", desc))
+
+        # 5. Filtrar y Popular Matriz de Comparativa (Pestaña 2)
+        self._apply_filter()
+
+    def _load_memory_data(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """Calcula estadísticas y comparativa proyectada del lote actualmente cargado en memoria."""
+        total_carpetas = len(self.parent_app.all_folder_items)
+        carpetas_bien = 0
+        carpetas_mal = 0
+        total_pdfs = 0
+        pdfs_bien = 0
+        pdfs_mal = 0
+        total_imagenes = 0
+        imagenes_bien = 0
+        imagenes_mal = 0
+
+        veredicto_counts: Dict[str, Dict[str, int]] = {}
+        caratula_counts: Dict[str, Dict[str, int]] = {}
+        comparison_list: List[Dict[str, Any]] = []
+
+        for idx, res in enumerate(self.parent_app.all_folder_items, start=1):
+            f_path_str = res.get("folder_path", "")
+            f_p = Path(f_path_str) if f_path_str else Path(".")
+            f_data = res.get("folder_data", {})
+            f_name = f_data.get("folder_name") or f_p.name
+            insp = res.get("caratula_inspection", {})
+            v_global = str(res.get("veredicto_global", "PENDIENTE")).upper()
+            c_status = str(insp.get("status", "PENDIENTE")).upper()
+            sugg_code = res.get("codigo_base_sugerido") or f_name
+            applied = res.get("applied_actions", [])
+            has_disc = res.get("has_discrepancy", False)
+
+            p_cnt = int(insp.get("total_regular_pdfs", 0)) + (1 if insp.get("caratula_path") else 0)
+            img_cnt = int(insp.get("total_pages_in_folder", 0))
+            if img_cnt <= 0:
+                img_cnt = p_cnt
+
+            total_pdfs += p_cnt
+            total_imagenes += img_cnt
+
+            es_bien = ("COINCIDE_TOTAL" in v_global or "CORRECTOS" in v_global or "REEMPLAZAR_HOJA_BLANCA" in v_global) and not has_disc and "DISCREPANCIA" not in v_global and "APARTAR" not in v_global
+
+            if es_bien:
+                carpetas_bien += 1
+                pdfs_bien += p_cnt
+                imagenes_bien += img_cnt
+            else:
+                carpetas_mal += 1
+                pdfs_mal += p_cnt
+                imagenes_mal += img_cnt
+
+            # Veredictos agrupados
+            if v_global not in veredicto_counts:
+                veredicto_counts[v_global] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+            veredicto_counts[v_global]["carpetas"] += 1
+            veredicto_counts[v_global]["pdfs"] += p_cnt
+            veredicto_counts[v_global]["imagenes"] += img_cnt
+
+            # Carátulas agrupadas
+            if c_status not in caratula_counts:
+                caratula_counts[c_status] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+            caratula_counts[c_status]["carpetas"] += 1
+            caratula_counts[c_status]["pdfs"] += p_cnt
+            caratula_counts[c_status]["imagenes"] += img_cnt
+
+            # Lista de archivos para la comparativa
+            page_counts = insp.get("pdf_page_counts", {})
+            pdf_files: List[Path] = []
+            if f_p.exists() and f_p.is_dir():
+                try:
+                    pdf_files = sorted([f for f in f_p.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"], key=lambda x: x.name)
+                except Exception:
+                    pdf_files = []
+
+            for pf in pdf_files:
+                orig_n = pf.name
+                sugg_pdf_n = FileOperations.build_new_pdf_name(orig_n, sugg_code, f_name)
+                dest_f = sugg_code if "COINCIDE" in v_global or "CORREGIDA" in v_global else (res.get("subcarpeta_revision") or f_name)
+                pgs = page_counts.get(orig_n, 1)
+                changed = (orig_n != sugg_pdf_n or f_name != dest_f)
+                estado_str = "✔ CONCLUIDO" if es_bien else ("🛠 REEMPLAZABLE" if c_status == "REEMPLAZABLE_HOJA_BLANCA" else "⚠ DISCREPANCIA")
+                oper_str = " -> ".join(applied) if applied else ("Renombre Proyectado" if changed else "Sin Cambios")
+
+                comparison_list.append({
+                    "nombre_origen": orig_n,
+                    "carpeta_origen": f_name,
+                    "ruta_origen": str(pf),
+                    "nombre_actual": sugg_pdf_n,
+                    "carpeta_actual": dest_f,
+                    "ruta_actual": str(pf.parent / sugg_pdf_n),
+                    "numero_paginas": pgs,
+                    "tipos_movimiento": oper_str,
+                    "cantidad_cambios": len(applied),
+                    "hash_inicial": "-",
+                    "hash_actual": "-",
+                    "fecha_ultimo_movimiento": "Sesión Activa",
+                    "ha_cambiado": changed,
+                    "estado_str": estado_str,
+                })
+
+        pct_carpetas_bien = round((carpetas_bien / total_carpetas * 100), 1) if total_carpetas > 0 else 0.0
+        pct_imagenes_bien = round((imagenes_bien / total_imagenes * 100), 1) if total_imagenes > 0 else 0.0
+        promedio_img_carpeta = round(total_imagenes / total_carpetas, 1) if total_carpetas > 0 else 0.0
+
+        stats = {
+            "total_carpetas": total_carpetas,
+            "carpetas_bien": carpetas_bien,
+            "carpetas_mal": carpetas_mal,
+            "pct_carpetas_bien": pct_carpetas_bien,
+            "total_pdfs": total_pdfs,
+            "pdfs_bien": pdfs_bien,
+            "pdfs_mal": pdfs_mal,
+            "total_imagenes": total_imagenes,
+            "imagenes_bien": imagenes_bien,
+            "imagenes_mal": imagenes_mal,
+            "pct_imagenes_bien": pct_imagenes_bien,
+            "promedio_img_carpeta": promedio_img_carpeta,
+            "archivos_modificados": sum(1 for c in comparison_list if c["ha_cambiado"]),
+            "paginas_modificadas": sum(c["numero_paginas"] for c in comparison_list if c["ha_cambiado"]),
+            "desglose_veredicto": veredicto_counts,
+            "desglose_caratula": caratula_counts,
+            "desglose_movimientos": [
+                {"tipo_movimiento": "Sesión Activa: Análisis", "cantidad": len(comparison_list), "paginas": total_imagenes}
+            ],
+        }
+        return stats, comparison_list
+
+    def _apply_filter(self):
+        q = self.search_var.get().strip().lower()
+        flt = self.active_filter
+
+        self.filtered_items = []
+        for item in self.comparison_items:
+            orig_n = item.get("nombre_origen", "")
+            orig_f = item.get("carpeta_origen", "")
+            curr_n = item.get("nombre_actual", "")
+            curr_f = item.get("carpeta_actual", "")
+            oper = item.get("tipos_movimiento", "")
+            estado = item.get("estado_str", "")
+            changed = item.get("ha_cambiado", False)
+
+            if flt == "MODIFICADOS" and not changed:
+                continue
+            elif flt == "DISCREPANCIA" and "DISCREPANCIA" not in estado and "REVISIÓN" not in estado:
+                continue
+            elif flt == "CONCLUIDOS" and "CONCLUIDO" not in estado and "✔" not in estado:
+                continue
+
+            if q:
+                searchable = f"{orig_n} {orig_f} {curr_n} {curr_f} {oper} {estado}".lower()
+                if q not in searchable:
+                    continue
+
+            self.filtered_items.append(item)
+
+        for row in self.tree_comp.get_children():
+            self.tree_comp.delete(row)
+
+        for idx, item in enumerate(self.filtered_items, start=1):
+            changed = item.get("ha_cambiado", False)
+            estado = item.get("estado_str", "")
+            tag = "modificado" if changed else ("discrepancia" if "DISCREPANCIA" in estado else "intacto")
+
+            h_orig_s = (item.get("hash_inicial") or "")[:12] + ("..." if len(item.get("hash_inicial", "")) > 12 else "")
+            h_dest_s = (item.get("hash_actual") or "")[:12] + ("..." if len(item.get("hash_actual", "")) > 12 else "")
+
+            self.tree_comp.insert(
+                "",
+                tk.END,
+                values=(
+                    idx,
+                    item.get("nombre_origen", ""),
+                    item.get("carpeta_origen", ""),
+                    item.get("nombre_actual", ""),
+                    item.get("carpeta_actual", ""),
+                    item.get("numero_paginas", 0),
+                    estado,
+                    item.get("tipos_movimiento", ""),
+                    h_orig_s,
+                    h_dest_s,
+                    item.get("fecha_ultimo_movimiento", ""),
+                ),
+                tags=(tag,)
+            )
+
+        self.lbl_filter_count.config(text=f"Mostrando {len(self.filtered_items):,} de {len(self.comparison_items):,} archivos")
+
+    def export_csv(self):
+        """Exporta el reporte ejecutivo completo a formato CSV (con BOM UTF-8 para Excel)."""
+        if not self.comparison_items and not self.stats_data:
+            messagebox.showwarning("Atención", "No hay datos para exportar en este momento.", parent=self)
+            return
+
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        def_name = f"Reporte_Ejecutivo_Trazabilidad_{now_str}.csv"
+        file_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Guardar Reporte Ejecutivo de Estadísticas y Trazabilidad",
+            defaultextension=".csv",
+            initialfile=def_name,
+            filetypes=[("Archivos CSV (Excel)", "*.csv"), ("Todos los archivos", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+
+                # 1. ENCABEZADO EJECUTIVO
+                writer.writerow(["========================================================================================="])
+                writer.writerow(["REPORTE EJECUTIVO DE AUDITORÍA REGISTRAL, DIMENSIONAMIENTO Y TRAZABILIDAD TOTAL"])
+                writer.writerow(["REGISTRO PÚBLICO DE LA PROPIEDAD Y DE COMERCIO DEL ESTADO DE CHIAPAS"])
+                writer.writerow([f"Fecha y Hora de Generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+                writer.writerow([f"Fuente de Datos Consultada: {self.source_var.get()}"])
+                writer.writerow(["========================================================================================="])
+                writer.writerow([])
+
+                # 2. RESUMEN DE VOLUMETRÍA Y ESTADÍSTICA
+                writer.writerow(["--- RESUMEN EJECUTIVO DE VOLUMETRÍA REGISTRAL ---"])
+                writer.writerow(["Concepto", "Total", "Concluidos / Validados (Bien)", "En Revisión / Incidencia (Mal)", "% Efectividad"])
+                writer.writerow([
+                    "Carpetas Registrales",
+                    self.stats_data.get("total_carpetas", 0),
+                    self.stats_data.get("carpetas_bien", 0),
+                    self.stats_data.get("carpetas_mal", 0),
+                    f"{self.stats_data.get('pct_carpetas_bien', 0.0)}%"
+                ])
+                writer.writerow([
+                    "Archivos PDF",
+                    self.stats_data.get("total_pdfs", 0),
+                    self.stats_data.get("pdfs_bien", 0),
+                    self.stats_data.get("pdfs_mal", 0),
+                    f"{round(self.stats_data.get('pdfs_bien', 0) / max(1, self.stats_data.get('total_pdfs', 1)) * 100, 1)}%"
+                ])
+                writer.writerow([
+                    "Imágenes Digitalizadas (Fojas/Páginas)",
+                    self.stats_data.get("total_imagenes", 0),
+                    self.stats_data.get("imagenes_bien", 0),
+                    self.stats_data.get("imagenes_mal", 0),
+                    f"{self.stats_data.get('pct_imagenes_bien', 0.0)}%"
+                ])
+                writer.writerow(["Promedio de Imágenes por Carpeta", f"{self.stats_data.get('promedio_img_carpeta', 0.0)} imágenes/carpeta", "", "", ""])
+                writer.writerow(["Archivos con Movimiento Físico / Modificados", self.stats_data.get("archivos_modificados", 0), "", "", ""])
+                writer.writerow([])
+
+                # 3. DESGLOSE POR VEREDICTO
+                writer.writerow(["--- DESGLOSE POR VEREDICTO Y DIAGNÓSTICO ---"])
+                writer.writerow(["Veredicto Registral", "Carpetas", "PDFs", "Imágenes (Fojas)", "% del Lote Total"])
+                t_c = max(1, self.stats_data.get("total_carpetas", 1))
+                for v_name, counts in self.stats_data.get("desglose_veredicto", {}).items():
+                    carp = counts.get("carpetas", 0)
+                    pdfs = counts.get("pdfs", 0)
+                    imgs = counts.get("imagenes", 0)
+                    pct = round(carp / t_c * 100, 1)
+                    writer.writerow([v_name, carp, pdfs, imgs, f"{pct}%"])
+                writer.writerow([])
+
+                # 4. TABLA DE TRAZABILIDAD DETALLADA ORIGINAL VS FINAL
+                writer.writerow(["--- MATRIZ COMPLETA DE TRAZABILIDAD CRUZADA (ORIGINAL VS FINAL) ---"])
+                writer.writerow([
+                    "#", "Archivo Original", "Carpeta Original", "Ruta Completa Original",
+                    "Archivo Final / Actual", "Carpeta Final / Actual", "Ruta Completa Final",
+                    "Páginas (Imágenes)", "Estado Registral", "Operaciones Aplicadas",
+                    "Hash SHA-256 Inicial", "Hash SHA-256 Actual", "Último Movimiento"
+                ])
+
+                for idx, row in enumerate(self.comparison_items, start=1):
+                    writer.writerow([
+                        idx,
+                        row.get("nombre_origen", ""),
+                        row.get("carpeta_origen", ""),
+                        row.get("ruta_origen", ""),
+                        row.get("nombre_actual", ""),
+                        row.get("carpeta_actual", ""),
+                        row.get("ruta_actual", ""),
+                        row.get("numero_paginas", 0),
+                        row.get("estado_str", ""),
+                        row.get("tipos_movimiento", ""),
+                        row.get("hash_inicial", ""),
+                        row.get("hash_actual", ""),
+                        row.get("fecha_ultimo_movimiento", "")
+                    ])
+
+            messagebox.showinfo(
+                "Exportación Exitosa",
+                f"El reporte ejecutivo fue exportado exitosamente a:\n{file_path}\n\n"
+                f"✔ Carpetas registradas: {self.stats_data.get('total_carpetas', 0)}\n"
+                f"✔ Total PDFs: {self.stats_data.get('total_pdfs', 0)}\n"
+                f"✔ Total Imágenes / Fojas: {self.stats_data.get('total_imagenes', 0):,}\n"
+                f"✔ Registros de trazabilidad: {len(self.comparison_items):,}",
+                parent=self
+            )
+        except Exception as e:
+            messagebox.showerror("Error al Exportar", f"Ocurrió un error al guardar el archivo CSV:\n{e}", parent=self)
 
 
 class ManualEditDialog(tk.Toplevel):
@@ -1396,10 +2148,15 @@ class OCRLibrosApp(tk.Tk):
         menubar = tk.Menu(self)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas y Trazabilidad (Original vs Final)...", command=self.open_statistics_dashboard)
+        tools_menu.add_separator()
         tools_menu.add_command(label="📁 Renombrar Carpetas por Primer PDF (con regla 0000)...", command=self.open_folder_renamer_dialog)
         tools_menu.add_command(label="🔀 Separar Archivos Mezclados en Carpetas Nuevas...", command=self.open_folder_separator_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🗄 Conexión MySQL & Crear Tablas de Trazabilidad...", command=self.open_mysql_dialog)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="⏪ Deshacer TODO (Rollback Físico al Origen Inicial)...", command=self.trigger_full_physical_rollback)
+        tools_menu.add_command(label="🧹 Reset Maestro de Sistema (Rollback Físico + Limpiar Bases de Datos a Cero)...", command=self.trigger_full_system_reset)
         menubar.add_cascade(label="🛠 Trazabilidad Física y MySQL", menu=tools_menu)
 
         config_menu = tk.Menu(menubar, tearoff=0)
@@ -1505,6 +2262,18 @@ class OCRLibrosApp(tk.Tk):
             state=tk.DISABLED
         )
         self.btn_stop.pack(side=tk.LEFT)
+
+        ttk.Button(
+            row_root,
+            text="📊 Estadísticas & Trazabilidad (Original vs Final)",
+            command=self.open_statistics_dashboard
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Button(
+            row_root,
+            text="⏪ Deshacer Todo (Rollback Físico)",
+            command=self.trigger_full_physical_rollback
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         # Fila 2: Directorio de Apartados + Directorio de Correctos + Filtro de Discrepancias
         row_apart = ttk.Frame(paths_frame)
@@ -1695,6 +2464,43 @@ class OCRLibrosApp(tk.Tk):
             row_act3,
             text="🗄 Conexión MySQL & Trazabilidad",
             command=self.open_mysql_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act3,
+            text="📊 Estadísticas y Dimensionamiento (Original vs Final)",
+            style="Primary.TButton",
+            command=self.open_statistics_dashboard
+        ).pack(side=tk.LEFT)
+
+        row_act4 = ttk.Frame(action_frame)
+        row_act4.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Label(
+            row_act4,
+            text="🛡️ Control y Reversión Total (Deshacer):",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#b45309"
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            row_act4,
+            text="⏪ Deshacer TODO (Rollback Físico al Origen Inicial)",
+            style="Action.TButton",
+            command=self.trigger_full_physical_rollback
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act4,
+            text="🧹 Reset Maestro (Rollback Físico + Limpiar Bases de Datos a Cero)",
+            style="Danger.TButton",
+            command=self.trigger_full_system_reset
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            row_act4,
+            text="📁 Revertir Solo Carpeta Seleccionada",
+            command=self.rollback_selected_folder_direct
         ).pack(side=tk.LEFT)
 
         # 5. Panel Dividido (Pestañas en Tiempo Real + Detalle)
@@ -1832,6 +2638,9 @@ class OCRLibrosApp(tk.Tk):
     def open_settings_dialog(self):
         SettingsDialog(self)
 
+    def open_statistics_dashboard(self):
+        ExecutiveTraceabilityDashboardDialog(self)
+
     def open_mysql_dialog(self):
         MySQLSettingsDialog(self)
 
@@ -1850,6 +2659,128 @@ class OCRLibrosApp(tk.Tk):
             messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla.")
             return
         ManualEditDialog(self, res)
+
+    def trigger_full_physical_rollback(self):
+        """
+        Ejecuta el Rollback Físico Total de todos los archivos y carpetas modificados,
+        restaurándolos a como estaban antes de correr cualquier proceso por primera vez.
+        """
+        candidates = self.service.db.get_rollback_candidates()
+        if not candidates:
+            messagebox.showinfo(
+                "Sin Cambios Pendientes",
+                "No hay archivos modificados pendientes por revertir en la base de datos.\n\n"
+                "Todos los archivos y carpetas ya se encuentran en su estado original.",
+                parent=self
+            )
+            return
+
+        folders_affected = set(c.get("nombre_carpeta_inicial") for c in candidates)
+        msg = (
+            "⏪ CONFIRMAR ROLLBACK TOTAL FÍSICO (DESHACER TODO)\n\n"
+            f"Se revertirán físicamente {len(candidates):,} archivo(s) de {len(folders_affected):,} carpeta(s) original(es).\n\n"
+            "Acciones de restauración inmediata:\n"
+            "  ✔ Todos los PDFs renombrados volverán a su nombre original.\n"
+            "  ✔ Todos los archivos movidos a apartados/validados volverán a su carpeta original.\n"
+            "  ✔ Hojas en blanco sustituidas volverán a su estado binario original (desde backup).\n"
+            "  ✔ Carpetas de destino vacías serán eliminadas limpiamente.\n\n"
+            "¿Deseas ejecutar el Rollback Total Físico ahora?"
+        )
+        if not messagebox.askyesno("⚠️ Confirmar Deshacer Todo (Rollback)", msg, icon="warning", parent=self):
+            return
+
+        res = self.service.rollback_all()
+        self.reload_root_preview()
+
+        if res.get("errors"):
+            messagebox.showwarning(
+                "Rollback con Avisos",
+                f"Archivos restaurados exitosamente: {res['restored_count']}/{res['total_candidates']}\n\n"
+                f"Avisos ({len(res['errors'])}):\n" + "\n".join(res["errors"][:8]),
+                parent=self
+            )
+        else:
+            messagebox.showinfo(
+                "✔ Rollback Total Concluido",
+                f"¡Se han restaurado exitosamente {res['restored_count']} archivo(s) a su estado original!\n\n"
+                "Todos los archivos y carpetas han vuelto exactamente a como estaban antes del primer cambio.",
+                parent=self
+            )
+
+    def trigger_full_system_reset(self):
+        """
+        Rollback Físico Completo + Limpieza / Reinicio de Bases de Datos (SQLite y MySQL) a cero absoluto.
+        Deja el sistema tal como estaba antes de correr cualquier análisis por primera vez.
+        """
+        candidates = self.service.db.get_rollback_candidates()
+        msg1 = (
+            "🚨 ATENCIÓN: RESET MAESTRO DE SISTEMA Y BASES DE DATOS\n\n"
+            "Esta acción realizará un restablecimiento TOTAL:\n"
+            f"1. Rollback Físico Completo: Restaurará los {len(candidates):,} archivo(s) a su nombre y ubicación inicial.\n"
+            "2. Reinicio de SQLite: Vaciará las tablas 'movimientos_archivos' y 'detecciones' de auditoría.\n"
+            "3. Reinicio de MySQL: Truncará las tablas de trazabilidad y diagnóstico en el servidor MySQL.\n\n"
+            "El sistema quedará en CERO ABSOLUTO, tal como estaba antes de correr cualquier diagnóstico por primera vez.\n\n"
+            "¿Estás seguro de que deseas continuar?"
+        )
+        if not messagebox.askyesno("🚨 Confirmar Reset Maestro (Paso 1 de 2)", msg1, icon="warning", parent=self):
+            return
+
+        clear_cache = messagebox.askyesno(
+            "Caché de Inteligencia Artificial (Paso 2 de 2)",
+            "¿Deseas también vaciar la caché local de análisis de Claude?\n\n"
+            "• 'Sí': Borra la caché de la IA para iniciar un análisis 100% fresco desde cero.\n"
+            "• 'No': Conserva la caché local para ahorrar tokens en futuros análisis.",
+            parent=self
+        )
+
+        res = self.service.full_system_reset(clear_cache=clear_cache)
+        rb_info = res["rollback_result"]
+        self.reload_root_preview()
+
+        messagebox.showinfo(
+            "✔ Reset Maestro Completado",
+            f"El sistema ha vuelto a su estado original inicial:\n\n"
+            f"• Archivos restaurados físicamente: {rb_info['restored_count']}/{rb_info['total_candidates']}\n"
+            f"• Base de datos SQLite: {res['sqlite_reset']['msg']}\n"
+            f"• Base de datos MySQL: {res['mysql_reset']['msg']}\n"
+            f"• Caché local de Claude: {'Vaciada' if res['cache_cleared'] else 'Conservada'}\n\n"
+            "Todo ha quedado limpio y en su estado inicial.",
+            parent=self
+        )
+
+    def rollback_selected_folder_direct(self):
+        """Revierte únicamente la carpeta actualmente seleccionada en la tabla."""
+        res = self._get_selected_result()
+        if not res:
+            messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla para revertir.", parent=self)
+            return
+
+        init_folder = res.get("initial_folder_path") or res.get("folder_path")
+        f_name = Path(init_folder).name
+
+        if not messagebox.askyesno(
+            "Revertir Carpeta Seleccionada",
+            f"¿Deseas revertir todos los archivos de la carpeta original:\n'{f_name}'\n\n"
+            "a su estado exacto antes del primer cambio?",
+            parent=self
+        ):
+            return
+
+        rb = self.service.rollback_folder(init_folder)
+        self.reload_root_preview()
+        if rb["errors"]:
+            messagebox.showwarning(
+                "Reversión con Avisos",
+                f"Archivos restaurados: {rb['restored_count']}/{rb['total_candidates']}\n\n"
+                + "\n".join(rb["errors"][:5]),
+                parent=self
+            )
+        else:
+            messagebox.showinfo(
+                "Carpeta Restaurada",
+                f"La carpeta '{f_name}' ({rb['restored_count']} archivos) fue restaurada intacta a su origen inicial.",
+                parent=self
+            )
 
     def _clear_cache_from_menu(self):
         removed = self.service.cache.clear()

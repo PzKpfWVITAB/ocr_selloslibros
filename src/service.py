@@ -243,7 +243,7 @@ class FolderOCRService:
                 "cache_summary": self.cache.get_summary(),
             }
             if save_to_db:
-                self.db.save_detection(result)
+                self._save_diagnosis_result(result)
             return result
 
         # Caso B: No hay archivo de carátula o existen PDFs sin página de carátula (y no se forzó Claude)
@@ -300,7 +300,7 @@ class FolderOCRService:
                 "cache_summary": self.cache.get_summary(),
             }
             if save_to_db:
-                self.db.save_detection(result)
+                self._save_diagnosis_result(result)
             return result
 
         # Caso C: Todos los PDFs tienen una página de la Carátula ('OK_CON_INFO' o 'REEMPLAZABLE_HOJA_BLANCA')
@@ -458,9 +458,34 @@ class FolderOCRService:
         }
 
         if save_to_db:
-            self.db.save_detection(result)
+            self._save_diagnosis_result(result)
 
         return result
+
+    def _save_diagnosis_result(self, result: Dict[str, Any]) -> None:
+        """Guarda el diagnóstico en SQLite local y, si está activo, en MySQL."""
+        self.db.save_detection(result)
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            try:
+                insp = result.get("caratula_inspection", {})
+                f_data = result.get("folder_data", {})
+                ocr = result.get("ocr_consolidado", {})
+                self.mysql.registrar_diagnostico_carpeta(
+                    ruta_carpeta=result.get("folder_path", ""),
+                    nombre_carpeta=f_data.get("folder_name", Path(result.get("folder_path", "")).name),
+                    pdf_caratula=insp.get("caratula_filename"),
+                    estado_caratula=insp.get("status", "DESCONOCIDO"),
+                    total_pdfs=int(insp.get("total_regular_pdfs", 0)),
+                    codigo_esperado=f_data.get("codigo_normalizado", ""),
+                    codigo_detectado=result.get("codigo_base_sugerido", ""),
+                    codigo_sugerido=result.get("codigo_base_sugerido", ""),
+                    veredicto=result.get("veredicto_global", "INDETERMINADO"),
+                    subcarpeta_revision=result.get("subcarpeta_revision", ""),
+                    evidencias_json=json.dumps(ocr.get("evidencias_globales", []), ensure_ascii=False) if isinstance(ocr, dict) else None,
+                    total_imagenes=int(insp.get("total_pages_in_folder", 0)),
+                )
+            except Exception as e:
+                print(f"[Service Warning] No se pudo guardar diagnóstico en MySQL: {e}")
 
     # =========================================================================
     # FASE 2: OPERACIONES FÍSICAS Y ROLLBACK TOTAL
@@ -490,6 +515,7 @@ class FolderOCRService:
             info_page_num=int(info_page_num),
             replaceable_pdfs=replaceable_pdfs,
             db_manager=self.db,
+            mysql_manager=self.mysql,
         )
 
         diag_result["needs_page_replacement"] = False
@@ -545,6 +571,7 @@ class FolderOCRService:
             folder_path=folder_path,
             clean_base_code=code,
             db_manager=self.db,
+            mysql_manager=self.mysql,
         )
         # Actualizar la ruta, el parser, la carátula y la comparativa en tiempo real
         new_folder_p = Path(res["new_folder_path"])
@@ -627,6 +654,7 @@ class FolderOCRService:
             db_manager=self.db,
             tipo_movimiento=f"APARTADO: {error_sub}",
             error_subfolder=error_sub,
+            mysql_manager=self.mysql,
         )
         new_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_p)
@@ -702,13 +730,46 @@ class FolderOCRService:
         return res
 
     def rollback_single_file(self, candidate: Dict[str, Any]):
-        return FileOperations.rollback_single_candidate(candidate, self.db)
+        return FileOperations.rollback_single_candidate(candidate, self.db, self.mysql)
 
     def rollback_folder(self, initial_folder_path: str) -> Dict[str, Any]:
-        return FileOperations.rollback_folder_to_initial_state(initial_folder_path, self.db)
+        return FileOperations.rollback_folder_to_initial_state(initial_folder_path, self.db, self.mysql)
 
     def rollback_all(self) -> Dict[str, Any]:
-        return FileOperations.rollback_all_to_initial_state(self.db)
+        return FileOperations.rollback_all_to_initial_state(self.db, self.mysql)
+
+    def full_system_reset(self, clear_cache: bool = False) -> Dict[str, Any]:
+        """
+        Ejecuta el Rollback Físico Completo y posteriormente limpia todas las bases de datos:
+        1. Revierte todos los archivos físicos a su ruta, nombre y contenido original.
+        2. Limpia las tablas de SQLite (auditoria_libros.db).
+        3. Limpia las tablas de MySQL (trazabilidad_selloslibros) si está habilitado.
+        4. Opcionalmente limpia la caché local de Claude.
+        """
+        # Paso 1: Rollback Físico de todos los archivos modificados
+        rb_res = self.rollback_all()
+
+        # Paso 2: Limpieza de SQLite local
+        sqlite_ok, sqlite_msg = self.db.reset_database()
+
+        # Paso 3: Limpieza de MySQL si activo
+        mysql_ok, mysql_msg = self.mysql.reset_database() if (self.mysql and getattr(self.mysql, "enabled", False)) else (True, "MySQL no activo")
+
+        # Paso 4: Limpieza de caché si solicitada
+        cache_cleared = False
+        if clear_cache:
+            try:
+                self.cache.clear_disk_cache()
+                cache_cleared = True
+            except Exception:
+                pass
+
+        return {
+            "rollback_result": rb_res,
+            "sqlite_reset": {"ok": sqlite_ok, "msg": sqlite_msg},
+            "mysql_reset": {"ok": mysql_ok, "msg": mysql_msg},
+            "cache_cleared": cache_cleared,
+        }
 
     @staticmethod
     def _build_error_result(folder_path: Path, error_msg: str) -> Dict[str, Any]:

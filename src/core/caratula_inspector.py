@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import cv2
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import numpy as np
 
 
@@ -259,31 +259,48 @@ class CaratulaInspector:
         Inspecciona un PDF individual verificando si contiene una página con info de la carátula,
         una página en blanco de la carátula, o ninguna.
         Usa un filtro rápido de firma en los primeros 8KB para evitar leer archivos completos por red.
+        Captura además el número total de páginas (imágenes digitalizadas) del archivo.
         """
+        page_cnt = 1
         try:
             # Nivel 1: Verificación ultrarrápida en los primeros 4KB del archivo (un solo bloque SMB)
             with open(pdf_file, "rb", buffering=4096) as f:
                 header_bytes = f.read(4096)
 
+            matched_fast = False
+            fast_kind = None
+            fast_blank_idx = 0
             for c_page in caratula_pages:
                 for sig in c_page.get("raw_sigs", []):
                     if sig and sig in header_bytes:
+                        matched_fast = True
                         if c_page["has_text"]:
-                            return {"kind": "INFO", "pdf_file": pdf_file}
+                            fast_kind = "INFO"
                         else:
-                            return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 0}
+                            fast_kind = "BLANK"
+                            fast_blank_idx = 0
+                        break
+                if matched_fast:
+                    break
 
-            # Nivel 2: Fallback abriendo el PDF con PyMuPDF
+            # Abrir con PyMuPDF para obtener recuento de páginas (imágenes) y verificación profunda si hace falta
             doc = fitz.open(str(pdf_file))
             try:
+                page_cnt = max(1, len(doc))
+                if matched_fast and fast_kind:
+                    res = {"kind": fast_kind, "pdf_file": pdf_file, "page_count": page_cnt}
+                    if fast_kind == "BLANK":
+                        res["blank_page_index"] = fast_blank_idx
+                    return res
+
                 if len(doc) == 0:
-                    return {"kind": "MISSING", "pdf_file": pdf_file}
+                    return {"kind": "MISSING", "pdf_file": pdf_file, "page_count": 0}
 
                 # Primero evaluar la página 1 (índice 0), que es donde se adjunta la carátula en cada PDF
                 p0_match = cls._match_page_against_caratula(doc, doc[0], caratula_pages, allow_dhash_for_text=True)
                 if p0_match is not None:
                     if p0_match["has_text"]:
-                        return {"kind": "INFO", "pdf_file": pdf_file}
+                        return {"kind": "INFO", "pdf_file": pdf_file, "page_count": page_cnt}
                     else:
                         # La página 1 coincide con la hoja en blanco de la carátula.
                         # Solo considerar que ya tiene la info si la página 2 tiene el stream exacto de la carátula con info.
@@ -292,28 +309,28 @@ class CaratulaInspector:
                                 doc, doc[1], caratula_pages, allow_dhash_for_text=False
                             )
                             if p1_exact is not None and p1_exact["has_text"]:
-                                return {"kind": "INFO", "pdf_file": pdf_file}
-                        return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 0}
+                                return {"kind": "INFO", "pdf_file": pdf_file, "page_count": page_cnt}
+                        return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 0, "page_count": page_cnt}
 
                 # Si la página 1 no hizo match directo pero está totalmente en blanco y la carátula tiene página en blanco:
                 p0_has_text, _, _ = cls.analyze_page_has_text(doc[0], dpi=100)
                 if not p0_has_text and has_blank_in_caratula:
-                    return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 0}
+                    return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 0, "page_count": page_cnt}
 
                 # Revisar página 2 (índice 1) por si la carátula estuviera en la segunda página
                 if len(doc) >= 2:
                     p1_match = cls._match_page_against_caratula(doc, doc[1], caratula_pages, allow_dhash_for_text=True)
                     if p1_match is not None:
                         if p1_match["has_text"]:
-                            return {"kind": "INFO", "pdf_file": pdf_file}
+                            return {"kind": "INFO", "pdf_file": pdf_file, "page_count": page_cnt}
                         else:
-                            return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 1}
+                            return {"kind": "BLANK", "pdf_file": pdf_file, "blank_page_index": 1, "page_count": page_cnt}
 
-                return {"kind": "MISSING", "pdf_file": pdf_file}
+                return {"kind": "MISSING", "pdf_file": pdf_file, "page_count": page_cnt}
             finally:
                 doc.close()
         except Exception:
-            return {"kind": "MISSING", "pdf_file": pdf_file}
+            return {"kind": "MISSING", "pdf_file": pdf_file, "page_count": page_cnt}
 
     @classmethod
     def inspect_folder(
@@ -383,6 +400,10 @@ class CaratulaInspector:
         pdfs_with_blank_page = 0
         pdfs_missing_caratula: List[str] = []
         replaceable_pdfs: List[Dict[str, Any]] = []
+        total_pages_in_folder = int(c_info.get("total_pages", 0))
+        pdf_page_counts: Dict[str, int] = {}
+        if caratula_pdf and caratula_pdf.exists():
+            pdf_page_counts[caratula_pdf.name] = total_pages_in_folder
 
         if regular_pdfs:
             workers = min(16, max(1, len(regular_pdfs)))
@@ -400,6 +421,10 @@ class CaratulaInspector:
                     res_item = fut.result()
                     kind = res_item["kind"]
                     pf: Path = res_item["pdf_file"]
+                    p_cnt = int(res_item.get("page_count", 1))
+                    total_pages_in_folder += p_cnt
+                    pdf_page_counts[pf.name] = p_cnt
+
                     if kind == "INFO":
                         pdfs_with_info_page += 1
                     elif kind == "BLANK":
@@ -442,6 +467,8 @@ class CaratulaInspector:
             "info_page_num": primary_info_page,
             "all_pdfs_have_caratula": all_have_caratula,
             "total_regular_pdfs": len(regular_pdfs),
+            "total_pages_in_folder": total_pages_in_folder,
+            "pdf_page_counts": pdf_page_counts,
             "pdfs_with_info_page": pdfs_with_info_page,
             "pdfs_with_blank_page": pdfs_with_blank_page,
             "pdfs_missing_caratula": pdfs_missing_caratula,

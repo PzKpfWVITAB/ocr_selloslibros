@@ -3,7 +3,7 @@ import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from src.core.settings_manager import SettingsManager
 
@@ -68,10 +68,17 @@ class DatabaseManager:
                         detectado_anio TEXT,
                         veredicto TEXT NOT NULL,
                         codigo_base_sugerido TEXT,
-                        evidencias_json TEXT
+                        evidencias_json TEXT,
+                        total_imagenes INTEGER DEFAULT 0
                     )
                     """
                 )
+
+                # Migración suave de columna total_imagenes si ya existía la tabla
+                try:
+                    cur.execute("ALTER TABLE detecciones ADD COLUMN total_imagenes INTEGER DEFAULT 0")
+                except Exception:
+                    pass
 
                 cur.execute(
                     """
@@ -121,6 +128,11 @@ class DatabaseManager:
         pdfs_sin_caratula = insp.get("pdfs_missing_caratula", [])
         evidencias = ocr.get("evidencias_globales", [])
 
+        tot_pdfs = int(insp.get("total_regular_pdfs", 0))
+        tot_img = int(insp.get("total_pages_in_folder", 0))
+        if tot_img <= 0:
+            tot_img = tot_pdfs + (1 if insp.get("caratula_path") else 0)
+
         with self._lock:
             conn = self._get_connection()
             try:
@@ -135,8 +147,8 @@ class DatabaseManager:
                         carpeta_volumen, carpeta_fraccionamiento, carpeta_anio,
                         detectado_seccion, detectado_libro, detectado_tomo,
                         detectado_volumen, detectado_fraccionamiento, detectado_anio,
-                        veredicto, codigo_base_sugerido, evidencias_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        veredicto, codigo_base_sugerido, evidencias_json, total_imagenes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         now_str,
@@ -146,7 +158,7 @@ class DatabaseManager:
                         str(insp.get("status", "DESCONOCIDO")),
                         insp.get("info_page_num"),
                         1 if insp.get("all_pdfs_have_caratula", False) else 0,
-                        int(insp.get("total_regular_pdfs", 0)),
+                        tot_pdfs,
                         int(insp.get("pdfs_with_info_page", 0)),
                         int(insp.get("pdfs_with_blank_page", 0)),
                         json.dumps(pdfs_sin_caratula, ensure_ascii=False),
@@ -166,6 +178,7 @@ class DatabaseManager:
                         str(diag.get("veredicto_global") or comp.get("veredicto") or "INDETERMINADO"),
                         str(diag.get("codigo_base_sugerido") or ""),
                         json.dumps(evidencias, ensure_ascii=False),
+                        tot_img,
                     ),
                 )
                 conn.commit()
@@ -388,5 +401,196 @@ class DatabaseManager:
                         (int(limit),),
                     )
                 return [dict(r) for r in cur.fetchall()]
+            finally:
+                conn.close()
+
+    def get_executive_statistics(self) -> Dict[str, Any]:
+        """
+        Calcula indicadores estadísticos cruzando detecciones y movimientos_archivos:
+        - Dimensionamiento de Carpetas: Total, Bien (Coincide/Corregidas), Mal (Discrepancia/Apartadas), % Efectividad.
+        - Dimensionamiento de Archivos PDF: Total PDFs registrados, PDFs en carpetas bien vs mal, PDFs modificados físicamente.
+        - Dimensionamiento de Imágenes (Páginas): Total imágenes, imágenes validadas, imágenes en revisión, promedio por carpeta.
+        - Desglose por veredicto y estado de carátula.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                # 1. Obtener última detección por carpeta
+                cur.execute("""
+                    SELECT d.*
+                    FROM detecciones d
+                    INNER JOIN (
+                        SELECT nombre_carpeta, MAX(id) as max_id
+                        FROM detecciones
+                        GROUP BY nombre_carpeta
+                    ) latest ON d.id = latest.max_id
+                """)
+                latest_dets = [dict(r) for r in cur.fetchall()]
+
+                # 2. Métricas de movimientos
+                cur.execute("""
+                    SELECT 
+                        COUNT(DISTINCT ruta_origen_inicial) as total_archivos_modificados,
+                        SUM(numero_paginas) as total_paginas_modificadas,
+                        COUNT(*) as total_movimientos
+                    FROM movimientos_archivos
+                    WHERE revertido = 0
+                """)
+                mov_row = cur.fetchone()
+                mov_stats = dict(mov_row) if mov_row else {}
+
+                # Desglose de movimientos por tipo
+                cur.execute("""
+                    SELECT tipo_movimiento, COUNT(*) as cantidad, SUM(numero_paginas) as paginas
+                    FROM movimientos_archivos
+                    WHERE revertido = 0
+                    GROUP BY tipo_movimiento
+                """)
+                mov_by_type = [dict(r) for r in cur.fetchall()]
+            finally:
+                conn.close()
+
+        total_carpetas = len(latest_dets)
+        carpetas_bien = 0
+        carpetas_mal = 0
+        total_pdfs = 0
+        pdfs_bien = 0
+        pdfs_mal = 0
+        total_imagenes = 0
+        imagenes_bien = 0
+        imagenes_mal = 0
+
+        veredicto_counts: Dict[str, Dict[str, int]] = {}
+        caratula_counts: Dict[str, Dict[str, int]] = {}
+
+        for d in latest_dets:
+            v = str(d.get("veredicto") or "PENDIENTE").upper()
+            c_stat = str(d.get("estado_caratula") or "DESCONOCIDO").upper()
+            p_cnt = int(d.get("total_pdfs") or 0)
+            img_cnt = int(d.get("total_imagenes") or p_cnt)
+            if img_cnt <= 0:
+                img_cnt = p_cnt
+
+            total_pdfs += p_cnt
+            total_imagenes += img_cnt
+
+            es_bien = ("COINCIDE_TOTAL" in v or "CORRECTOS" in v or "REEMPLAZAR_HOJA_BLANCA" in v) and "DISCREPANCIA" not in v and "APARTAR" not in v
+
+            if es_bien:
+                carpetas_bien += 1
+                pdfs_bien += p_cnt
+                imagenes_bien += img_cnt
+            else:
+                carpetas_mal += 1
+                pdfs_mal += p_cnt
+                imagenes_mal += img_cnt
+
+            # Veredictos agrupados
+            if v not in veredicto_counts:
+                veredicto_counts[v] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+            veredicto_counts[v]["carpetas"] += 1
+            veredicto_counts[v]["pdfs"] += p_cnt
+            veredicto_counts[v]["imagenes"] += img_cnt
+
+            # Estado carátula agrupado
+            if c_stat not in caratula_counts:
+                caratula_counts[c_stat] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+            caratula_counts[c_stat]["carpetas"] += 1
+            caratula_counts[c_stat]["pdfs"] += p_cnt
+            caratula_counts[c_stat]["imagenes"] += img_cnt
+
+        pct_carpetas_bien = round((carpetas_bien / total_carpetas * 100), 1) if total_carpetas > 0 else 0.0
+        pct_imagenes_bien = round((imagenes_bien / total_imagenes * 100), 1) if total_imagenes > 0 else 0.0
+        promedio_img_carpeta = round(total_imagenes / total_carpetas, 1) if total_carpetas > 0 else 0.0
+
+        return {
+            "total_carpetas": total_carpetas,
+            "carpetas_bien": carpetas_bien,
+            "carpetas_mal": carpetas_mal,
+            "pct_carpetas_bien": pct_carpetas_bien,
+            "total_pdfs": total_pdfs,
+            "pdfs_bien": pdfs_bien,
+            "pdfs_mal": pdfs_mal,
+            "total_imagenes": total_imagenes,
+            "imagenes_bien": imagenes_bien,
+            "imagenes_mal": imagenes_mal,
+            "pct_imagenes_bien": pct_imagenes_bien,
+            "promedio_img_carpeta": promedio_img_carpeta,
+            "archivos_modificados": mov_stats.get("total_archivos_modificados") or 0,
+            "paginas_modificadas": mov_stats.get("total_paginas_modificadas") or 0,
+            "desglose_veredicto": veredicto_counts,
+            "desglose_caratula": caratula_counts,
+            "desglose_movimientos": mov_by_type,
+        }
+
+    def get_traceability_comparison(
+        self,
+        filter_text: str = "",
+        only_changed: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna la matriz de trazabilidad comparando el estado inicial contra el actual:
+        [Archivo Original | Ubicación Original | Archivo Actual | Ubicación Actual | Págs | Operación | Hashes]
+        """
+        candidates = self.get_rollback_candidates()
+        results: List[Dict[str, Any]] = []
+        q = (filter_text or "").strip().lower()
+
+        for c in candidates:
+            orig_name = c["nombre_origen_inicial"]
+            orig_folder = c["nombre_carpeta_inicial"]
+            curr_name = c["nombre_actual"]
+            curr_folder = Path(c["carpeta_actual"]).name
+            changed = (orig_name != curr_name or c["carpeta_origen_inicial"] != c["carpeta_actual"])
+
+            if only_changed and not changed:
+                continue
+
+            if q:
+                searchable = f"{orig_name} {orig_folder} {curr_name} {curr_folder} {c['tipos_movimiento_str']}".lower()
+                if q not in searchable:
+                    continue
+
+            results.append({
+                "nombre_origen": orig_name,
+                "carpeta_origen": orig_folder,
+                "ruta_origen": c["ruta_origen_inicial"],
+                "nombre_actual": curr_name,
+                "carpeta_actual": curr_folder,
+                "ruta_actual": c["ruta_actual"],
+                "numero_paginas": c["numero_paginas"],
+                "tipos_movimiento": c["tipos_movimiento_str"],
+                "cantidad_cambios": c["cantidad_cambios"],
+                "hash_inicial": c["hash_origen_inicial"],
+                "hash_actual": c["hash_actual"],
+                "fecha_ultimo_movimiento": c["ultima_fecha"],
+                "ha_cambiado": changed,
+                "estado_str": "MODIFICADO" if changed else "INTACTO",
+            })
+
+        return results
+
+    def reset_database(self) -> Tuple[bool, str]:
+        """
+        Limpia completamente las tablas de 'movimientos_archivos' y 'detecciones',
+        reiniciando los contadores autoincrementables y compactando la base de datos con VACUUM.
+        Deja la base de datos SQLite en cero absoluto (estado inicial).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM movimientos_archivos")
+                cur.execute("DELETE FROM detecciones")
+                try:
+                    cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('movimientos_archivos', 'detecciones')")
+                except Exception:
+                    pass
+                conn.commit()
+                conn.execute("VACUUM")
+                return True, "Base de datos SQLite restablecida a estado inicial (0 registros)."
+            except Exception as e:
+                return False, f"Error al reiniciar base de datos SQLite: {e}"
             finally:
                 conn.close()

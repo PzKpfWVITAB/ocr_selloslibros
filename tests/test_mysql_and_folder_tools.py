@@ -2,7 +2,7 @@ import unittest
 import tempfile
 import shutil
 from pathlib import Path
-import fitz
+import pymupdf as fitz
 
 from src.database.mysql_manager import MySQLManager
 from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf

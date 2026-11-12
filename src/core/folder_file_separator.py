@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
-import fitz
+import pymupdf as fitz
 
 from src.parsers.folder_parser import FolderParser
 from src.database.mysql_manager import MySQLManager

@@ -168,10 +168,16 @@ class MySQLManager:
                         `veredicto` VARCHAR(100) NOT NULL,
                         `subcarpeta_revision` VARCHAR(100) NULL,
                         `evidencias_json` LONGTEXT NULL,
+                        `total_imagenes` INT NOT NULL DEFAULT 0,
                         INDEX `idx_veredicto` (`veredicto`),
                         INDEX `idx_nom_carp` (`nombre_carpeta`)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                 """)
+
+                try:
+                    cur.execute("ALTER TABLE `auditoria_diagnosticos` ADD COLUMN `total_imagenes` INT NOT NULL DEFAULT 0;")
+                except Exception:
+                    pass
 
             conn.close()
             return True, f"Base de datos '{self.database}' y tablas creadas exitosamente."
@@ -307,3 +313,276 @@ class MySQLManager:
         except Exception as err:
             print(f"[MySQLManager ERROR] registrar_separacion_carpeta: {err}")
             return None
+
+    def registrar_diagnostico_carpeta(
+        self,
+        ruta_carpeta: str,
+        nombre_carpeta: str,
+        pdf_caratula: Optional[str],
+        estado_caratula: str,
+        total_pdfs: int,
+        codigo_esperado: str,
+        codigo_detectado: str,
+        codigo_sugerido: str,
+        veredicto: str,
+        subcarpeta_revision: str,
+        evidencias_json: Optional[str] = None,
+        total_imagenes: int = 0
+    ) -> Optional[int]:
+        if not self.enabled:
+            return None
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO `auditoria_diagnosticos` (
+                        `ruta_carpeta`, `nombre_carpeta`, `pdf_caratula`, `estado_caratula`,
+                        `total_pdfs`, `codigo_esperado`, `codigo_detectado`, `codigo_sugerido`,
+                        `veredicto`, `subcarpeta_revision`, `evidencias_json`, `total_imagenes`
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    ruta_carpeta, nombre_carpeta, pdf_caratula, estado_caratula,
+                    total_pdfs, codigo_esperado, codigo_detectado, codigo_sugerido,
+                    veredicto, subcarpeta_revision, evidencias_json, total_imagenes
+                ))
+                inserted_id = cur.lastrowid
+            conn.close()
+            return inserted_id
+        except Exception as err:
+            print(f"[MySQLManager ERROR] registrar_diagnostico_carpeta: {err}")
+            return None
+
+    def get_executive_statistics(self) -> Dict[str, Any]:
+        """
+        Calcula indicadores estadísticos en el servidor MySQL:
+        - Dimensionamiento de Carpetas (Total, Bien, Mal, % Efectividad).
+        - Dimensionamiento de PDFs (Total, Bien, Mal, Modificados).
+        - Dimensionamiento de Imágenes / Páginas (Total Imágenes, Imágenes Bien, Imágenes Mal).
+        """
+        if not self.enabled:
+            return {}
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                # 1. Diagnósticos más recientes por carpeta
+                cur.execute("""
+                    SELECT a.*
+                    FROM auditoria_diagnosticos a
+                    INNER JOIN (
+                        SELECT nombre_carpeta, MAX(id) as max_id
+                        FROM auditoria_diagnosticos
+                        GROUP BY nombre_carpeta
+                    ) latest ON a.id = latest.max_id
+                """)
+                latest_dets = cur.fetchall()
+
+                # 2. Métricas de trazabilidad de archivos
+                cur.execute("""
+                    SELECT 
+                        COUNT(DISTINCT ruta_completa_origen) as total_archivos_modificados,
+                        SUM(numero_paginas) as total_paginas_modificadas,
+                        COUNT(*) as total_movimientos
+                    FROM trazabilidad_archivos
+                """)
+                mov_stats = cur.fetchone() or {}
+
+                # Desglose de movimientos por tipo
+                cur.execute("""
+                    SELECT tipo_operacion as tipo_movimiento, COUNT(*) as cantidad, SUM(numero_paginas) as paginas
+                    FROM trazabilidad_archivos
+                    GROUP BY tipo_operacion
+                """)
+                mov_by_type = cur.fetchall()
+            conn.close()
+
+            total_carpetas = len(latest_dets)
+            carpetas_bien = 0
+            carpetas_mal = 0
+            total_pdfs = 0
+            pdfs_bien = 0
+            pdfs_mal = 0
+            total_imagenes = 0
+            imagenes_bien = 0
+            imagenes_mal = 0
+
+            veredicto_counts: Dict[str, Dict[str, int]] = {}
+            caratula_counts: Dict[str, Dict[str, int]] = {}
+
+            for d in latest_dets:
+                v = str(d.get("veredicto") or "PENDIENTE").upper()
+                c_stat = str(d.get("estado_caratula") or "DESCONOCIDO").upper()
+                p_cnt = int(d.get("total_pdfs") or 0)
+                img_cnt = int(d.get("total_imagenes") or p_cnt)
+                if img_cnt <= 0:
+                    img_cnt = p_cnt
+
+                total_pdfs += p_cnt
+                total_imagenes += img_cnt
+
+                es_bien = ("COINCIDE_TOTAL" in v or "CORRECTOS" in v or "REEMPLAZAR_HOJA_BLANCA" in v) and "DISCREPANCIA" not in v and "APARTAR" not in v
+
+                if es_bien:
+                    carpetas_bien += 1
+                    pdfs_bien += p_cnt
+                    imagenes_bien += img_cnt
+                else:
+                    carpetas_mal += 1
+                    pdfs_mal += p_cnt
+                    imagenes_mal += img_cnt
+
+                if v not in veredicto_counts:
+                    veredicto_counts[v] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+                veredicto_counts[v]["carpetas"] += 1
+                veredicto_counts[v]["pdfs"] += p_cnt
+                veredicto_counts[v]["imagenes"] += img_cnt
+
+                if c_stat not in caratula_counts:
+                    caratula_counts[c_stat] = {"carpetas": 0, "pdfs": 0, "imagenes": 0}
+                caratula_counts[c_stat]["carpetas"] += 1
+                caratula_counts[c_stat]["pdfs"] += p_cnt
+                caratula_counts[c_stat]["imagenes"] += img_cnt
+
+            pct_carpetas_bien = round((carpetas_bien / total_carpetas * 100), 1) if total_carpetas > 0 else 0.0
+            pct_imagenes_bien = round((imagenes_bien / total_imagenes * 100), 1) if total_imagenes > 0 else 0.0
+            promedio_img_carpeta = round(total_imagenes / total_carpetas, 1) if total_carpetas > 0 else 0.0
+
+            return {
+                "total_carpetas": total_carpetas,
+                "carpetas_bien": carpetas_bien,
+                "carpetas_mal": carpetas_mal,
+                "pct_carpetas_bien": pct_carpetas_bien,
+                "total_pdfs": total_pdfs,
+                "pdfs_bien": pdfs_bien,
+                "pdfs_mal": pdfs_mal,
+                "total_imagenes": total_imagenes,
+                "imagenes_bien": imagenes_bien,
+                "imagenes_mal": imagenes_mal,
+                "pct_imagenes_bien": pct_imagenes_bien,
+                "promedio_img_carpeta": promedio_img_carpeta,
+                "archivos_modificados": mov_stats.get("total_archivos_modificados") or 0,
+                "paginas_modificadas": mov_stats.get("total_paginas_modificadas") or 0,
+                "desglose_veredicto": veredicto_counts,
+                "desglose_caratula": caratula_counts,
+                "desglose_movimientos": mov_by_type,
+            }
+        except Exception as e:
+            print(f"[MySQLManager ERROR] get_executive_statistics: {e}")
+            return {}
+
+    def get_traceability_comparison(
+        self,
+        filter_text: str = "",
+        only_changed: bool = False,
+        limit: int = 5000
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna la matriz de trazabilidad desde MySQL:
+        [Archivo Original | Ubicación Original | Archivo Destino | Ubicación Destino | Págs | Operación | Hashes]
+        """
+        if not self.enabled:
+            return []
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM `trazabilidad_archivos` ORDER BY `id` DESC LIMIT {int(limit)}")
+                rows = cur.fetchall()
+            conn.close()
+
+            results: List[Dict[str, Any]] = []
+            q = (filter_text or "").strip().lower()
+
+            for r in rows:
+                orig_name = r.get("archivo_nombre_origen") or ""
+                orig_folder = Path(r.get("carpeta_origen") or "").name
+                curr_name = r.get("archivo_nombre_destino") or ""
+                curr_folder = Path(r.get("carpeta_destino") or "").name
+                changed = (orig_name != curr_name or r.get("carpeta_origen") != r.get("carpeta_destino"))
+
+                if only_changed and not changed:
+                    continue
+
+                if q:
+                    searchable = f"{orig_name} {orig_folder} {curr_name} {curr_folder} {r.get('tipo_operacion')}".lower()
+                    if q not in searchable:
+                        continue
+
+                results.append({
+                    "nombre_origen": orig_name,
+                    "carpeta_origen": orig_folder,
+                    "ruta_origen": r.get("ruta_completa_origen") or "",
+                    "nombre_actual": curr_name,
+                    "carpeta_actual": curr_folder,
+                    "ruta_actual": r.get("ruta_completa_destino") or "",
+                    "numero_paginas": r.get("numero_paginas") or 0,
+                    "tipos_movimiento": r.get("tipo_operacion") or "",
+                    "cantidad_cambios": 1,
+                    "hash_inicial": r.get("hash_sha256") or "",
+                    "hash_actual": r.get("hash_sha256") or "",
+                    "fecha_ultimo_movimiento": str(r.get("fecha_movimiento") or ""),
+                    "ha_cambiado": changed,
+                    "estado_str": "MODIFICADO" if changed else "INTACTO",
+                })
+
+            return results
+        except Exception as e:
+            print(f"[MySQLManager ERROR] get_traceability_comparison: {e}")
+            return []
+
+    def registrar_rollback_archivo(
+        self,
+        archivo_nombre_revertido: str,
+        ruta_origen_restaurada: str,
+        hash_sha256: str = "",
+        numero_paginas: int = 0
+    ) -> Optional[int]:
+        """Registra un evento de reversión / rollback en la trazabilidad de MySQL."""
+        if not self.enabled:
+            return None
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO `trazabilidad_archivos` (
+                        `tipo_operacion`, `archivo_nombre_origen`, `archivo_nombre_destino`,
+                        `carpeta_origen`, `carpeta_destino`, `ruta_completa_origen`, `ruta_completa_destino`,
+                        `hash_sha256`, `numero_paginas`, `estado_operacion`, `detalles_json`
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    "ROLLBACK_REVERTIDO",
+                    archivo_nombre_revertido,
+                    archivo_nombre_revertido,
+                    str(Path(ruta_origen_restaurada).parent),
+                    str(Path(ruta_origen_restaurada).parent),
+                    ruta_origen_restaurada,
+                    ruta_origen_restaurada,
+                    hash_sha256,
+                    numero_paginas,
+                    "REVERTIDO_A_ORIGEN",
+                    "Restaurado a estado inicial previo al primer cambio"
+                ))
+                inserted_id = cur.lastrowid
+            conn.close()
+            return inserted_id
+        except Exception as err:
+            print(f"[MySQLManager ERROR] registrar_rollback_archivo: {err}")
+            return None
+
+    def reset_database(self) -> Tuple[bool, str]:
+        """
+        Limpia / trunca todas las tablas de trazabilidad en el servidor MySQL:
+        'trazabilidad_archivos', 'movimientos_carpetas', 'separaciones_carpetas', 'auditoria_diagnosticos'.
+        Deja el esquema MySQL en cero absoluto.
+        """
+        if not self.enabled:
+            return True, "MySQL no está habilitado."
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE `trazabilidad_archivos`;")
+                cur.execute("TRUNCATE TABLE `movimientos_carpetas`;")
+                cur.execute("TRUNCATE TABLE `separaciones_carpetas`;")
+                cur.execute("TRUNCATE TABLE `auditoria_diagnosticos`;")
+            conn.close()
+            return True, "Tablas de MySQL truncadas y restablecidas a estado inicial (0 registros)."
+        except Exception as e:
+            return False, f"Error al reiniciar tablas de MySQL: {e}"

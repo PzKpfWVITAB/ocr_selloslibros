@@ -11,7 +11,7 @@ if exist ".venv\Scripts\python.exe" (
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo [AVISO] Ocurrió un error al iniciar la aplicación.
+    echo [AVISO] Ocurrio un error al iniciar la aplicacion.
     echo Si es una PC nueva o faltan dependencias, ejecuta primero 'instalar_entorno.bat'.
     echo.
     pause
