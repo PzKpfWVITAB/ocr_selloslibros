@@ -271,8 +271,20 @@ class FolderOCRService:
                 "pdf_file": insp.get("caratula_filename") or "SIN CARÁTULA",
                 "evidencias": ev_lines,
             }
-            veredicto_g = "SIN_ARCHIVO_CARATULA" if c_status == "SIN_ARCHIVO_CARATULA" else "DISCREPANCIA_SIN_CARATULA"
-            sub_rev = "SIN ARCHIVO CARATULA" if c_status == "SIN_ARCHIVO_CARATULA" else "PDFS SIN CARATULA"
+            has_dup = len(insp.get("dup_pdfs", [])) > 0
+            has_reg = len(insp.get("irregular_pdfs", [])) > 0
+            if has_dup and has_reg:
+                veredicto_g = "REVISION_DUP_Y_REG"
+                sub_rev = "ARCHIVOS CON DUP Y REG"
+            elif has_reg:
+                veredicto_g = "REVISION_ARCHIVOS_REG"
+                sub_rev = "ARCHIVOS IRREGULARES REG"
+            elif has_dup:
+                veredicto_g = "REVISION_ARCHIVOS_DUP"
+                sub_rev = "ARCHIVOS CON DUP"
+            else:
+                veredicto_g = "SIN_ARCHIVO_CARATULA" if c_status == "SIN_ARCHIVO_CARATULA" else "DISCREPANCIA_SIN_CARATULA"
+                sub_rev = "SIN ARCHIVO CARATULA" if c_status == "SIN_ARCHIVO_CARATULA" else "PDFS SIN CARATULA"
             comparison = {
                 "veredicto": veredicto_g,
                 "discrepancias": ev_lines,
@@ -435,7 +447,30 @@ class FolderOCRService:
                 found_any_ocr_info=True,
             )
 
-        has_discrepancy = veredicto_global != "COINCIDE_TOTAL"
+        # REGLA ESTRICTA DE DUP Y REG: Si la carpeta contiene archivos con _DUP o archivos REG/irregulares,
+        # se clasifica directamente para Apartado / Revisión y NUNCA se da por COINCIDE_TOTAL.
+        has_dup = len(insp.get("dup_pdfs", [])) > 0
+        has_reg = len(insp.get("irregular_pdfs", [])) > 0
+
+        if has_dup or has_reg:
+            needs_apartar = True
+            if has_dup and has_reg:
+                veredicto_global = "REVISION_DUP_Y_REG"
+                subcarpeta_revision = "ARCHIVOS CON DUP Y REG"
+                msg_flag = f"⚠ [APARTADO DIRECTO] Contiene {len(insp.get('dup_pdfs', []))} archivo(s) DUP y {len(insp.get('irregular_pdfs', []))} archivo(s) REG."
+            elif has_reg:
+                veredicto_global = "REVISION_ARCHIVOS_REG"
+                subcarpeta_revision = "ARCHIVOS IRREGULARES REG"
+                msg_flag = f"⚠ [APARTADO DIRECTO] Contiene {len(insp.get('irregular_pdfs', []))} archivo(s) irregular(es) tipo REG ({', '.join(insp.get('irregular_pdfs', [])[:5])})."
+            else:
+                veredicto_global = "REVISION_ARCHIVOS_DUP"
+                subcarpeta_revision = "ARCHIVOS CON DUP"
+                msg_flag = f"⚠ [APARTADO DIRECTO] Contiene {len(insp.get('dup_pdfs', []))} archivo(s) con sufijo DUP ({', '.join(insp.get('dup_pdfs', [])[:5])})."
+
+            ocr_final.setdefault("evidencias_globales", []).append(f"{msg_flag} Clasificada para revisión en '{subcarpeta_revision}'.")
+            comparison.setdefault("discrepancias", []).append(msg_flag)
+
+        has_discrepancy = (veredicto_global != "COINCIDE_TOTAL") or needs_apartar
 
         result = {
             "folder_path": str(folder_p),

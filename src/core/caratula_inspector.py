@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import cv2
@@ -46,6 +47,33 @@ class CaratulaInspector:
             [f for f in p.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
             key=lambda x: x.name
         )
+
+    @staticmethod
+    def is_duplicate_pdf_name(filename: str) -> bool:
+        """Detecta si el archivo PDF tiene sufijo de duplicado (_DUP, _DUP1, etc.)."""
+        stem = Path(filename).stem
+        return bool(re.search(r"[_+-]DUP\d*(\.pdf)?$", stem, re.IGNORECASE)) or "_DUP" in stem.upper()
+
+    @staticmethod
+    def is_irregular_reg_pdf_name(filename: str) -> bool:
+        """
+        Detecta si el archivo PDF es un documento irregular o fuera de formato
+        (ej. 'REG_-60.pdf', 'REG 60.pdf' o archivos sin estructura registral de libro/año).
+        """
+        stem = Path(filename).stem
+        if "CARATULA" in stem.upper():
+            return False
+        # Si contiene 'REG' y no empieza con el código registral de 2 dígitos estándar
+        if re.search(r"\bREG\b|REG[-_\s]", stem, re.IGNORECASE) and not re.match(r"^\d{2}_", stem):
+            return True
+        # Si no tiene año de 4 dígitos ni estructura registral estándar
+        clean_stem = re.sub(r"[_+-]DUP\d*.*$", "", stem, flags=re.IGNORECASE)
+        tokens = clean_stem.split("_")
+        has_year = any(
+            (tok.isdigit() and len(tok) == 4 and 1800 <= int(tok) <= 2035) or tok == "0000"
+            for tok in tokens[2:]
+        )
+        return not has_year
 
     @staticmethod
     def _render_page_gray(page: fitz.Page, dpi: int = 100) -> np.ndarray:
@@ -343,6 +371,8 @@ class CaratulaInspector:
         """
         folder = Path(folder_path)
         all_pdfs = cls.list_folder_pdfs(folder)
+        dup_pdfs = [f.name for f in all_pdfs if cls.is_duplicate_pdf_name(f.name)]
+        irregular_pdfs = [f.name for f in all_pdfs if cls.is_irregular_reg_pdf_name(f.name)]
 
         caratula_pdf: Optional[Path] = None
         if custom_caratula_path:
@@ -364,6 +394,8 @@ class CaratulaInspector:
                 "pdfs_with_blank_page": 0,
                 "pdfs_missing_caratula": [f.name for f in all_pdfs],
                 "replaceable_pdfs": [],
+                "dup_pdfs": dup_pdfs,
+                "irregular_pdfs": irregular_pdfs,
                 "summary_message": "No se encontró un archivo PDF con 'CARATULA' en la carpeta.",
             }
 
@@ -390,6 +422,8 @@ class CaratulaInspector:
                 "pdfs_with_blank_page": len(regular_pdfs),
                 "pdfs_missing_caratula": [],
                 "replaceable_pdfs": [],
+                "dup_pdfs": dup_pdfs,
+                "irregular_pdfs": irregular_pdfs,
                 "summary_message": (
                     f"Todas las páginas ({c_info['total_pages']}) de '{caratula_pdf.name}' están en blanco. "
                     "Debe enviarse al directorio de Apartados (0 tokens consumidos)."
@@ -473,5 +507,7 @@ class CaratulaInspector:
             "pdfs_with_blank_page": pdfs_with_blank_page,
             "pdfs_missing_caratula": pdfs_missing_caratula,
             "replaceable_pdfs": replaceable_pdfs,
+            "dup_pdfs": dup_pdfs,
+            "irregular_pdfs": irregular_pdfs,
             "summary_message": msg,
         }

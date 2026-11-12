@@ -228,6 +228,85 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertEqual(sep_info["group_key"], "01_02_05_00_00_00_2000")
         self.assertFalse(sep_info["is_irregular"])
 
+    def test_09_dup_and_reg_folders_route_directly_to_apartados(self):
+        """
+        Verifica que al hacer análisis de OCR:
+        - Las carpetas que contienen archivos con DUP o archivos irregulares tipo REG
+          se clasifiquen DIRECTAMENTE para el apartado de revisión (needs_apartar = True).
+        - Se determinen las subcarpetas descriptivas:
+          'ARCHIVOS CON DUP', 'ARCHIVOS IRREGULARES REG' o 'ARCHIVOS CON DUP Y REG'.
+        - Se puedan mover a Apartados y restaurar con Rollback.
+        """
+        from src.core.caratula_inspector import CaratulaInspector
+        from src.core.file_operations import FileOperations
+
+        # 1. Verificar subcarpetas descriptivas en FileOperations
+        sub_dup = FileOperations.determine_review_subfolder("OK_CON_INFO", "REVISION_ARCHIVOS_DUP")
+        self.assertEqual(sub_dup, "ARCHIVOS CON DUP")
+
+        sub_reg = FileOperations.determine_review_subfolder("OK_CON_INFO", "REVISION_ARCHIVOS_REG")
+        self.assertEqual(sub_reg, "ARCHIVOS IRREGULARES REG")
+
+        sub_both = FileOperations.determine_review_subfolder("OK_CON_INFO", "REVISION_DUP_Y_REG")
+        self.assertEqual(sub_both, "ARCHIVOS CON DUP Y REG")
+
+        # 2. Crear carpeta de prueba con carátula, archivo normal, archivo DUP y archivo REG
+        f_test = self.temp_dir / "01_02_05_00_00_00_2000"
+        f_test.mkdir(parents=True, exist_ok=True)
+        # Carátula con texto oficial suficiente (>= 12 caracteres) para ser detectada con información
+        self._create_dummy_pdf(
+            f_test / "01_02_05_00_00_00_2000_CARATULA_00.pdf",
+            text="SECCION SEGUNDA LIBRO QUINTO TOMO CERO PROPIEDAD 2000"
+        )
+        self._create_dummy_pdf(
+            f_test / "01_02_05_00_00_00_2000_0001_00.pdf",
+            text="SECCION SEGUNDA LIBRO QUINTO TOMO CERO PROPIEDAD 2000 TRAMITE 1"
+        )
+        self._create_dummy_pdf(
+            f_test / "01_02_05_00_00_00_2000_0001_00_DUP1.pdf",
+            text="SECCION SEGUNDA LIBRO QUINTO TOMO CERO PROPIEDAD 2000 TRAMITE 1 DUP"
+        )
+        self._create_dummy_pdf(
+            f_test / "REG_-60.pdf",
+            text="DOCUMENTO SUELTO REGISTRO 60 FUERA DE FORMATO"
+        )
+
+        insp = CaratulaInspector.inspect_folder(f_test)
+        self.assertIn("01_02_05_00_00_00_2000_0001_00_DUP1.pdf", insp["dup_pdfs"])
+        self.assertIn("REG_-60.pdf", insp["irregular_pdfs"])
+
+        # 3. Diagnosticar con FolderOCRService
+        from src.service import FolderOCRService
+        service = FolderOCRService(db_path=self.temp_dir / "test_apartados.db")
+        diag = service.process_folder(str(f_test), save_to_db=True)
+
+        self.assertTrue(diag["needs_apartar"])
+        self.assertTrue(diag["has_discrepancy"])
+        self.assertEqual(diag["veredicto_global"], "REVISION_DUP_Y_REG")
+        self.assertEqual(diag["subcarpeta_revision"], "ARCHIVOS CON DUP Y REG")
+
+        # 4. Mover a apartados y verificar estructura en disco
+        apartados_root = self.temp_dir / "DIR_APARTADOS"
+        apartados_root.mkdir(parents=True, exist_ok=True)
+        res_move = service.execute_move_to_apartados(diag, str(apartados_root))
+
+        moved_folder = Path(res_move["new_folder_path"])
+        self.assertTrue(moved_folder.exists())
+        self.assertEqual(moved_folder.parent.name, "ARCHIVOS CON DUP Y REG")
+        self.assertTrue((moved_folder / "REG_-60.pdf").exists())
+        self.assertTrue((moved_folder / "01_02_05_00_00_00_2000_0001_00_DUP1.pdf").exists())
+
+        # 5. Rollback total: la carpeta regresa intacta a su ubicación original
+        from src.core.file_operations import FileOperations
+        res_rb = FileOperations.rollback_folder_to_initial_state(
+            initial_folder_path=f_test,
+            db_manager=service.db,
+        )
+        self.assertEqual(len(res_rb["errors"]), 0)
+        self.assertGreater(res_rb["restored_count"], 0)
+        self.assertTrue(f_test.exists())
+        self.assertTrue((f_test / "REG_-60.pdf").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

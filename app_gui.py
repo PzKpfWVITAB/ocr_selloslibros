@@ -3103,6 +3103,15 @@ class OCRLibrosApp(tk.Tk):
             elif v_global == "SIN_INFO_MANTENER_NOMBRE":
                 tag = "blank"
                 v_label = "📦 SIN DATOS (APARTAR)"
+            elif v_global == "REVISION_ARCHIVOS_DUP":
+                tag = "diff"
+                v_label = "📦 APARTAR (CON DUP)"
+            elif v_global == "REVISION_ARCHIVOS_REG":
+                tag = "diff"
+                v_label = "📦 APARTAR (IRREGULARES REG)"
+            elif v_global == "REVISION_DUP_Y_REG":
+                tag = "diff"
+                v_label = "📦 APARTAR (DUP Y REG)"
             elif v_global == "PENDIENTE_DIAGNOSTICO":
                 tag = "pending"
                 v_label = "⏳ Pendiente Diagnóstico"

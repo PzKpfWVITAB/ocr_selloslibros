@@ -454,6 +454,12 @@ class FileOperations:
         c_st = (caratula_status or "").upper()
         ver = (veredicto_global or "").upper()
 
+        if "DUP_Y_REG" in ver:
+            return "ARCHIVOS CON DUP Y REG"
+        if "REG" in ver or "IRREGULAR" in ver:
+            return "ARCHIVOS IRREGULARES REG"
+        if "DUP" in ver:
+            return "ARCHIVOS CON DUP"
         if c_st == "TOTALMENTE_BLANCA" or ver == "APARTAR_CARATULA_BLANCA":
             return "CARATULA EN BLANCO"
         if c_st == "SIN_ARCHIVO_CARATULA" or ver == "SIN_ARCHIVO_CARATULA":
