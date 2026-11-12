@@ -2185,7 +2185,7 @@ class OCRLibrosApp(tk.Tk):
         tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas MySQL (Original vs Final)...", command=self.open_statistics_dashboard)
         tools_menu.add_separator()
         tools_menu.add_command(label="📁 Paso 1: Indexar en MySQL y Renombrar por 1er PDF", command=self.run_step1_index_and_rename_async)
-        tools_menu.add_command(label="🔍 Paso 2: Chequeo de Estructura + Diagnóstico General", command=self.start_batch_diagnosis)
+        tools_menu.add_command(label="🔍 Paso 2: Chequeo de Estructura + Diagnóstico General", command=self.start_analysis)
         tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
         tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
         tools_menu.add_separator()
@@ -2339,8 +2339,8 @@ class OCRLibrosApp(tk.Tk):
 
         ttk.Button(
             row_root,
-            text="⏪ Deshacer Todo (Rollback Físico)",
-            command=self.trigger_full_physical_rollback
+            text="⏪ Revertir Último Lote (Rollback)",
+            command=self.trigger_rollback_last_batch
         ).pack(side=tk.LEFT, padx=(6, 0))
 
         # Fila 2: Directorio de Apartados + Directorio de Correctos + Filtro de Discrepancias
@@ -2505,7 +2505,7 @@ class OCRLibrosApp(tk.Tk):
             row_b1,
             text="🔍 2. Chequeo de Estructura + Diagnóstico General (IA)",
             style="Action.TButton",
-            command=self.start_batch_diagnosis
+            command=self.start_analysis
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         row_b2 = ttk.Frame(card_batch)
