@@ -75,16 +75,28 @@ class FolderRenamerByFirstPdf:
 
         # Buscar la posición del año (4 dígitos o 0000)
         # En el estándar: [del]_[sec]_[lib]_[tom/materia]_[vol]_[fracc]_[año]_[hoja]_[copia]
+        # Regla crítica: El año SIEMPRE está antes de la hoja/registro y copia.
+        # Buscamos de izquierda a derecha (hacia adelante) para tomar el primer año real y no
+        # confundirlo con números de registro de 4 dígitos posteriores (ej. registro 1905).
+        # Empezamos preferentemente desde la posición 6 (o mínimo 3 si el formato es compacto).
         year_idx = -1
         year_val = ""
 
-        # Recorrer desde atrás para buscar el año (normalmente antes de la hoja y la copia)
-        for i in range(len(tokens) - 1, -1, -1):
+        start_idx = 6 if len(tokens) >= 8 else 3
+        for i in range(start_idx, len(tokens)):
             tok = tokens[i]
             if (tok.isdigit() and len(tok) == 4 and 1800 <= int(tok) <= 2035) or tok == "0000":
                 year_idx = i
                 year_val = tok
                 break
+
+        if year_idx == -1 and start_idx > 3:
+            for i in range(3, start_idx):
+                tok = tokens[i]
+                if (tok.isdigit() and len(tok) == 4 and 1800 <= int(tok) <= 2035) or tok == "0000":
+                    year_idx = i
+                    year_val = tok
+                    break
 
         if year_idx == -1:
             # Fallback con regex: buscar patrón _YYYY_ o _0000_

@@ -81,6 +81,13 @@ def build():
         "--hidden-import=src.parsers.text_normalizer",
         "--hidden-import=src.parsers.stamp_parser",
         "--hidden-import=src.matcher.comparator",
+        "--exclude-module=torch",
+        "--exclude-module=torchvision",
+        "--exclude-module=scipy",
+        "--exclude-module=pandas",
+        "--exclude-module=matplotlib",
+        "--exclude-module=IPython",
+        "--exclude-module=PySide6",
         str(PROJECT_DIR / "app_gui.py")
     ]
 

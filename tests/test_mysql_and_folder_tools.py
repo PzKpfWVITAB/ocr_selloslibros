@@ -199,6 +199,35 @@ class TestMySQLAndFolderTools(unittest.TestCase):
         self.assertEqual(len(dup_items), 1)
         self.assertEqual(dup_items[0]["estado_str"], "REVISIÓN MANUAL (DUP)")
 
+    def test_08_registration_number_resembling_year_not_confused_with_year(self):
+        """
+        Verifica que números de registro/inscripción de 4 dígitos (como 1905, 1891, 1803)
+        que caen en el rango 1800-2035 NO se confundan con el año del libro registral.
+        El año real siempre precede al número de registro en la estructura de libro.
+        """
+        # Caso 1: Trámite con registro 1905 y año 2000 (caso reportado por el usuario)
+        pdf1 = "01_02_05_00_00_00_2000_1905_00.pdf"
+        folder1 = "01_02_05_00_00_00_2000_1905"
+        code1, msg1 = FolderRenamerByFirstPdf.get_first_pdf_code_up_to_year(pdf1, folder1)
+        self.assertEqual(code1, "01_02_05_00_00_00_2000")
+
+        # Caso 2: Folio 0000 con año 0000 heredando de carpeta 2007 (no debe quedar 0000_2007)
+        pdf2 = "01_00_00_00_00_00_0000_0000_00.pdf"
+        folder2 = "2007_00_00_00_00_0000-0001"
+        code2, msg2 = FolderRenamerByFirstPdf.get_first_pdf_code_up_to_year(pdf2, folder2)
+        self.assertEqual(code2, "01_00_00_00_00_00_2007")
+
+        # Caso 3: Folio 0000 con año real 1995 (no debe duplicar el año como 1995_1995)
+        pdf3 = "01_04_01_00_00_00_1995_0000_00.pdf"
+        folder3 = "1995_04_01_00_00_0001-0100"
+        code3, msg3 = FolderRenamerByFirstPdf.get_first_pdf_code_up_to_year(pdf3, folder3)
+        self.assertEqual(code3, "01_04_01_00_00_00_1995")
+
+        # Caso 4: En el separador de libros, group_key debe ser exactamente el libro hasta el año
+        sep_info = FolderFileSeparator.parse_pdf_group_key("01_02_05_00_00_00_2000_1905_00.pdf")
+        self.assertEqual(sep_info["group_key"], "01_02_05_00_00_00_2000")
+        self.assertFalse(sep_info["is_irregular"])
+
 
 if __name__ == "__main__":
     unittest.main()

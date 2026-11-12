@@ -40,15 +40,25 @@ class FolderFileSeparator:
 
         tokens = clean_stem.split("_")
 
-        # Buscar año de 4 dígitos o 0000
+        # Buscar año de 4 dígitos o 0000 de izquierda a derecha para no confundir
+        # el año con números de registro posteriores (ej. registro 1905).
         year_idx = -1
         year_val = ""
-        for i in range(len(tokens) - 1, -1, -1):
+        start_idx = 6 if len(tokens) >= 8 else 3
+        for i in range(start_idx, len(tokens)):
             tok = tokens[i]
             if (tok.isdigit() and len(tok) == 4 and 1800 <= int(tok) <= 2035) or tok == "0000":
                 year_idx = i
                 year_val = tok
                 break
+
+        if year_idx == -1 and start_idx > 3:
+            for i in range(3, start_idx):
+                tok = tokens[i]
+                if (tok.isdigit() and len(tok) == 4 and 1800 <= int(tok) <= 2035) or tok == "0000":
+                    year_idx = i
+                    year_val = tok
+                    break
 
         is_irregular = False
         irregular_reason = None
