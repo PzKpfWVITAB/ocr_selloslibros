@@ -3,9 +3,14 @@ import json
 import uuid
 import shutil
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
+
+from src.core.logger import get_logger
+
+logger = get_logger("mysql_manager")
 
 
 class MySQLManager:
@@ -31,18 +36,33 @@ class MySQLManager:
         self.database = database.strip()
         self.enabled = enabled
 
-    def get_connection(self, include_db: bool = True):
-        return pymysql.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            password=self.password,
-            database=self.database if include_db else None,
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=10,
-            autocommit=True
-        )
+    def get_connection(self, include_db: bool = True, max_retries: int = 3, retry_delay: float = 0.5):
+        """
+        Obtiene una conexión pymysql con reintentos automáticos y backoff ante caídas transitorias.
+        """
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                return pymysql.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    password=self.password,
+                    database=self.database if include_db else None,
+                    charset="utf8mb4",
+                    cursorclass=pymysql.cursors.DictCursor,
+                    connect_timeout=10,
+                    autocommit=True
+                )
+            except (pymysql.err.OperationalError, pymysql.err.DatabaseError) as err:
+                last_exc = err
+                if attempt < max_retries - 1:
+                    logger.warning(f"Reintentando conexión a MySQL ({attempt+1}/{max_retries}) tras error: {err}")
+                    time.sleep(retry_delay * (2 ** attempt))
+                else:
+                    logger.error(f"Fallo definitivo al conectar a MySQL tras {max_retries} intentos: {err}")
+        if last_exc:
+            raise last_exc
 
     @staticmethod
     def compute_sha256(file_path: Any) -> str:
@@ -636,8 +656,8 @@ class MySQLManager:
                 for d in level:
                     try:
                         nxt.extend([c for c in d.iterdir() if c.is_dir()])
-                    except Exception:
-                        pass
+                    except Exception as scan_err:
+                        logger.debug(f"No se pudo explorar directorio {d}: {scan_err}")
                 level = nxt
             for c in level:
                 if "_" not in c.name:
@@ -778,8 +798,8 @@ class MySQLManager:
                 }
 
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(f"Error al obtener estadísticas ejecutivas desde MySQL: {exc}", exc_info=True)
         return stats
 
     def obtener_matriz_trazabilidad(self, modo: str = "carpetas") -> List[Dict[str, Any]]:
@@ -916,8 +936,8 @@ class MySQLManager:
                             "estado_str": estado_str,
                         })
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(f"Error al obtener matriz de trazabilidad ({modo}) desde MySQL: {exc}", exc_info=True)
         return items
 
     def reset_database(self) -> Tuple[bool, str]:

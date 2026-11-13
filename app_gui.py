@@ -28,6 +28,9 @@ from src.database.mysql_manager import MySQLManager
 from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
 from src.core.folder_file_separator import FolderFileSeparator
 from src.core.pdf_selector import PDFSelector
+from src.core.logger import get_logger
+
+logger = get_logger("app_gui")
 
 
 class SettingsDialog(tk.Toplevel):
@@ -3525,6 +3528,7 @@ class OCRLibrosApp(tk.Tk):
     def report_callback_exception(self, exc, val, tb):
         import traceback
         traceback.print_exception(exc, val, tb)
+        logger.error(f"Excepción no controlada en hilo de interfaz: {exc.__name__}: {val}", exc_info=(exc, val, tb))
         try:
             messagebox.showerror("Error", f"{exc.__name__}: {val}", parent=self)
         except Exception:

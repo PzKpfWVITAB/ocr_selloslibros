@@ -15,11 +15,14 @@ from src.core.settings_manager import SettingsManager
 from src.core.cache_manager import CacheManager
 from src.core.claude_engine import ClaudeVisionEngine
 from src.core.caratula_inspector import CaratulaInspector
-from src.core.file_operations import FileOperations
+from src.core.file_operations import FileOperations, safe_replace, safe_move
 from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
 from src.parsers.folder_parser import FolderParser
 from src.matcher.comparator import FolderComparator
 from src.database.mysql_manager import MySQLManager
+from src.core.logger import get_logger
+
+logger = get_logger("service")
 
 
 class OperationBusyError(RuntimeError):
@@ -933,15 +936,24 @@ class FolderOCRService:
         ejec_id = ejecucion_id
         if crear_lote_propio and self.mysql and getattr(self.mysql, "enabled", False):
             ejec_id = self.mysql.crear_ejecucion_lote("RENOMBRADO_INDIVIDUAL", {"folder": old_name, "target": code})
-        res = FileOperations.rename_folder_and_internal_pdfs(
-            folder_path=folder_path,
-            clean_base_code=code,
-            db_manager=None,
-            mysql_manager=self.mysql,
-            ejecucion_id=ejec_id,
-        )
-        if crear_lote_propio and ejec_id is not None:
-            self.mysql.finalizar_ejecucion_lote(ejec_id, 1, res.get("files_renamed_count", 0))
+        try:
+            res = FileOperations.rename_folder_and_internal_pdfs(
+                folder_path=folder_path,
+                clean_base_code=code,
+                db_manager=None,
+                mysql_manager=self.mysql,
+                ejecucion_id=ejec_id,
+            )
+            if crear_lote_propio and ejec_id is not None:
+                self.mysql.finalizar_ejecucion_lote(ejec_id, 1, res.get("files_renamed_count", 0))
+        except Exception as exc:
+            if crear_lote_propio and ejec_id is not None:
+                try:
+                    self.mysql.finalizar_ejecucion_lote(ejec_id, 0, 0, estado="FALLIDO", detalles={"error": str(exc)})
+                except Exception:
+                    pass
+            logger.error(f"Error renombrando carpeta individual '{old_name}': {exc}", exc_info=True)
+            raise
         # Actualizar la ruta, el parser, la carátula y la comparativa en tiempo real
         new_folder_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_folder_p)
@@ -1301,17 +1313,26 @@ class FolderOCRService:
             )
             own_batch = True
 
-        res = FileOperations.move_folder_to_apartados(
-            folder_path=folder_path,
-            apartados_dir=apartados_dir,
-            db_manager=None,
-            tipo_movimiento=f"APARTADO: {error_sub}",
-            error_subfolder=error_sub,
-            mysql_manager=self.mysql,
-            ejecucion_id=ejecucion_id,
-        )
-        if own_batch and ejecucion_id is not None:
-            self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+        try:
+            res = FileOperations.move_folder_to_apartados(
+                folder_path=folder_path,
+                apartados_dir=apartados_dir,
+                db_manager=None,
+                tipo_movimiento=f"APARTADO: {error_sub}",
+                error_subfolder=error_sub,
+                mysql_manager=self.mysql,
+                ejecucion_id=ejecucion_id,
+            )
+            if own_batch and ejecucion_id is not None:
+                self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+        except Exception as exc:
+            if own_batch and ejecucion_id is not None:
+                try:
+                    self.mysql.finalizar_ejecucion_lote(ejecucion_id, 0, 0, estado="FALLIDO", detalles={"error": str(exc)})
+                except Exception:
+                    pass
+            logger.error(f"Error al mover carpeta a apartados '{folder_path}': {exc}", exc_info=True)
+            raise
 
         new_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_p)
@@ -1354,15 +1375,24 @@ class FolderOCRService:
             )
             own_batch = True
 
-        res = FileOperations.move_folder_to_validados(
-            folder_path=folder_path,
-            validados_dir=validados_dir,
-            db_manager=None,
-            mysql_manager=self.mysql,
-            ejecucion_id=ejecucion_id,
-        )
-        if own_batch and ejecucion_id is not None:
-            self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+        try:
+            res = FileOperations.move_folder_to_validados(
+                folder_path=folder_path,
+                validados_dir=validados_dir,
+                db_manager=None,
+                mysql_manager=self.mysql,
+                ejecucion_id=ejecucion_id,
+            )
+            if own_batch and ejecucion_id is not None:
+                self.mysql.finalizar_ejecucion_lote(ejecucion_id, 1, res.get("files_moved_count", 0))
+        except Exception as exc:
+            if own_batch and ejecucion_id is not None:
+                try:
+                    self.mysql.finalizar_ejecucion_lote(ejecucion_id, 0, 0, estado="FALLIDO", detalles={"error": str(exc)})
+                except Exception:
+                    pass
+            logger.error(f"Error al mover carpeta a validados '{folder_path}': {exc}", exc_info=True)
+            raise
 
         new_p = Path(res["new_folder_path"])
         diag_result["folder_path"] = str(new_p)
@@ -1960,8 +1990,8 @@ class FolderOCRService:
             try:
                 self.cache.clear_disk_cache()
                 cache_cleared = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error al limpiar caché en disco: {e}")
 
         return {
             "reverted_batches": reverted_batches,
