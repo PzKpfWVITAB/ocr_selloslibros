@@ -903,6 +903,7 @@ class FolderOCRService:
         self,
         diag_result: Dict[str, Any],
         custom_clean_base_code: Optional[str] = None,
+        ejecucion_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Renombra los PDFs internos con el código base hasta el año (SIN _2, _3) y
@@ -928,8 +929,9 @@ class FolderOCRService:
             code = "_".join(parts)
 
         old_name = Path(str(folder_path)).name
-        ejec_id = None
-        if self.mysql and getattr(self.mysql, "enabled", False):
+        crear_lote_propio = (ejecucion_id is None)
+        ejec_id = ejecucion_id
+        if crear_lote_propio and self.mysql and getattr(self.mysql, "enabled", False):
             ejec_id = self.mysql.crear_ejecucion_lote("RENOMBRADO_INDIVIDUAL", {"folder": old_name, "target": code})
         res = FileOperations.rename_folder_and_internal_pdfs(
             folder_path=folder_path,
@@ -938,7 +940,7 @@ class FolderOCRService:
             mysql_manager=self.mysql,
             ejecucion_id=ejec_id,
         )
-        if ejec_id is not None:
+        if crear_lote_propio and ejec_id is not None:
             self.mysql.finalizar_ejecucion_lote(ejec_id, 1, res.get("files_renamed_count", 0))
         # Actualizar la ruta, el parser, la carátula y la comparativa en tiempo real
         new_folder_p = Path(res["new_folder_path"])
@@ -985,6 +987,19 @@ class FolderOCRService:
 
 
         ocr_final = diag_result.get("ocr_consolidado", {})
+        if custom_clean_base_code:
+            c_parsed = FolderParser.parse(custom_clean_base_code)
+            if c_parsed and c_parsed.get("delegacion"):
+                ocr_final["seccion"] = c_parsed.get("seccion_raw") or "00"
+                ocr_final["libro"] = c_parsed.get("libro_raw") or "00"
+                ocr_final["tomo"] = c_parsed.get("tomo_raw") or "00"
+                ocr_final["volumen"] = c_parsed.get("volumen_raw") or "00"
+                ocr_final["fraccionamiento"] = c_parsed.get("fraccionamiento_raw") or "00"
+                ocr_final["anio"] = c_parsed.get("anio_raw") or "0000"
+                ocr_final.setdefault("evidencias_globales", []).append(
+                    f"✏️ Corrección manual de código base por el usuario: {custom_clean_base_code}"
+                )
+
         found_any_ocr_info = any(
             str(ocr_final.get(k, "00")).strip() not in ("00", "0", "0000", "", "None", "-")
             for k in ("seccion", "libro", "tomo", "volumen", "fraccionamiento", "anio")
@@ -992,7 +1007,17 @@ class FolderOCRService:
         if found_any_ocr_info:
             diag_result["comparacion"] = FolderComparator.compare(diag_result["folder_data"], ocr_final)
 
-        if diag_result.get("veredicto_global") == "SIN_INFO_LIMPIAR_NOMBRE":
+        new_comp = diag_result.get("comparacion", {})
+        comp_v = new_comp.get("veredicto")
+        has_dup = len(insp.get("dup_pdfs", [])) > 0
+        has_reg = len(insp.get("irregular_pdfs", [])) > 0
+
+        if comp_v == "COINCIDE_TOTAL" and not has_dup and not has_reg:
+            diag_result["veredicto_global"] = "COINCIDE_TOTAL"
+            diag_result["has_discrepancy"] = False
+            diag_result["needs_apartar"] = False
+            diag_result["subcarpeta_revision"] = ""
+        elif diag_result.get("veredicto_global") == "SIN_INFO_LIMPIAR_NOMBRE":
             diag_result["veredicto_global"] = "SIN_INFO_MANTENER_NOMBRE"
         elif not diag_result.get("needs_page_replacement") and not diag_result.get("needs_apartar"):
             diag_result["veredicto_global"] = "COINCIDE_TOTAL"
@@ -1121,6 +1146,8 @@ class FolderOCRService:
                 diag_result["veredicto_global"] = "COINCIDE_TOTAL"
                 diag_result["needs_rename"] = False
                 diag_result["has_discrepancy"] = False
+                diag_result["needs_apartar"] = False
+                diag_result["subcarpeta_revision"] = ""
                 insp["status"] = "OK_CON_INFO"
 
         return {

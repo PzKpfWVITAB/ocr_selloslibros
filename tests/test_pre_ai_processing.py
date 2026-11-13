@@ -144,6 +144,62 @@ class TestPreAIProcessing(unittest.TestCase):
                 "01_01_04_00_00_00_2000"
             ])
 
+    def test_discrepancy_correction_and_manual_override(self):
+        with patch("src.service.SettingsManager.load", return_value=dict(self.test_settings)):
+            svc = FolderOCRService()
+
+            # Caso 1: Carpeta en ceros pero OCR/Caratula detectó datos reales
+            # La carpeta tiene 01_00_00_00_00_00_1995 y OCR detectó Libro 02
+            f_test = self.root_dir / "01_00_00_00_00_00_1995"
+            f_test.mkdir()
+            _create_dummy_pdf(f_test / "01_00_00_00_00_00_1995_0001_0010.pdf", pages=2)
+
+            diag = {
+                "folder_path": str(f_test),
+                "folder_data": {"delegacion": "01", "folder_name": f_test.name, "is_valid": True},
+                "codigo_base_sugerido": "01_01_02_00_00_00_1995",
+                "needs_rename": True,
+                "needs_apartar": True,
+                "has_discrepancy": True,
+                "veredicto_global": "DISCREPANCIA",
+                "subcarpeta_revision": "DISCREPANCIA CARATULA VS CARPETA",
+                "caratula_inspection": {"status": "OK_CON_INFO", "dup_pdfs": [], "irregular_pdfs": []},
+                "ocr_consolidado": {
+                    "seccion": "01", "libro": "02", "tomo": "00",
+                    "volumen": "00", "fraccionamiento": "00", "anio": "1995"
+                }
+            }
+
+            # Renombrar usando el código sugerido por la carátula
+            ren_res = svc.execute_folder_and_pdfs_rename(diag)
+            self.assertEqual(diag["veredicto_global"], "COINCIDE_TOTAL", "Al corregir discrepancia debe pasar a COINCIDE_TOTAL")
+            self.assertFalse(diag["needs_apartar"], "Ya no debe estar marcada para apartar")
+            self.assertFalse(diag["has_discrepancy"], "Ya no debe tener discrepancia")
+            self.assertEqual(diag["subcarpeta_revision"], "")
+
+            # Caso 2: La IA leyó un dato erróneo (ej. Libro 04), pero el usuario revisa la carátula
+            # y ve que en realidad es Libro 03, aplicando un override manual
+            diag2 = {
+                "folder_path": diag["folder_path"],
+                "folder_data": diag["folder_data"],
+                "codigo_base_sugerido": "01_01_04_00_00_00_1995",  # Dato erróneo de IA
+                "needs_rename": True,
+                "needs_apartar": True,
+                "has_discrepancy": True,
+                "veredicto_global": "DISCREPANCIA",
+                "caratula_inspection": {"status": "OK_CON_INFO", "dup_pdfs": [], "irregular_pdfs": []},
+                "ocr_consolidado": {
+                    "seccion": "01", "libro": "04", "tomo": "00",
+                    "volumen": "00", "fraccionamiento": "00", "anio": "1995"
+                }
+            }
+
+            # Usuario aplica corrección manual con custom_clean_base_code
+            ren_manual = svc.execute_folder_and_pdfs_rename(diag2, custom_clean_base_code="01_01_03_00_00_00_1995")
+            self.assertEqual(diag2["veredicto_global"], "COINCIDE_TOTAL")
+            self.assertFalse(diag2["needs_apartar"], "Con la corrección manual debe ser válida y no apartarse")
+            self.assertEqual(diag2["ocr_consolidado"]["libro"], "03", "OCR consolidado debe reflejar el libro corregido por el usuario")
+
 
 if __name__ == "__main__":
     unittest.main()

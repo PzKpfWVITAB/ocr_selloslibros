@@ -1467,18 +1467,40 @@ class ManualEditDialog(tk.Toplevel):
         )
         self.preview_code_var.set(code)
 
-    def _save_code(self):
-        new_code = self.preview_code_var.get().strip()
+    def _apply_manual_fields_to_res(self, new_code: str):
+        sec = self.sec_var.get().strip()
+        lib = self.lib_var.get().strip()
+        tom = self.tom_var.get().strip()
+        vol = self.vol_var.get().strip()
+        fracc = self.fracc_var.get().strip()
+        anio = self.anio_var.get().strip()
+
         self.res["codigo_base_sugerido"] = new_code
         self.parent_app.suggested_code_var.set(new_code)
+
+        ocr = self.res.setdefault("ocr_consolidado", {})
+        ocr["seccion"] = sec
+        ocr["libro"] = lib
+        ocr["tomo"] = tom
+        ocr["volumen"] = vol
+        ocr["fraccionamiento"] = fracc
+        ocr["anio"] = anio
+        ev = ocr.setdefault("evidencias_globales", [])
+        ev.append(f"✏️ Corrección manual de carátula por el usuario: {new_code}")
+
+        self.res["comparacion"] = FolderComparator.compare(self.res.get("folder_data", {}), ocr)
+        self.res["needs_rename"] = True
+
+    def _save_code(self):
+        new_code = self.preview_code_var.get().strip()
+        self._apply_manual_fields_to_res(new_code)
         self.parent_app._refresh_master_table()
         self.parent_app._render_single_folder_detail(self.res)
         self.destroy()
 
     def _rename_now(self):
         new_code = self.preview_code_var.get().strip()
-        self.res["codigo_base_sugerido"] = new_code
-        self.parent_app.suggested_code_var.set(new_code)
+        self._apply_manual_fields_to_res(new_code)
         self.destroy()
         self.parent_app.rename_selected_folder()
 
@@ -2670,6 +2692,7 @@ class OCRLibrosApp(tk.Tk):
         tools_menu.add_command(label="✅ Paso 2B: Auditar Correctas en MySQL (0 Tokens)", command=self.run_step2b_auditar_async)
         tools_menu.add_command(label="📁 Paso 2C: Mover Correctas a Validados", command=self.run_step2c_trasladar_validadas_async)
         tools_menu.add_command(label="🔍 Paso 2D: Diagnóstico General con IA (Restantes)", command=self.start_analysis)
+        tools_menu.add_command(label="✏️ Paso 2E: Corregir y Renombrar Discrepancias (según Carátula/IA)", command=self.run_batch_rename_discrepancies_async)
         tools_menu.add_separator()
         tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
         tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
@@ -3025,22 +3048,28 @@ class OCRLibrosApp(tk.Tk):
             text="🔍 2D. Diagnóstico IA (Restantes)",
             style="Action.TButton",
             command=self.start_analysis
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="✏️ 2E. Corregir Discrepancias",
+            style="Primary.TButton",
+            command=self.run_batch_rename_discrepancies_async
         ).pack(side=tk.LEFT)
 
-        # Fila 3: Paso 3
+        # Fila 3: Paso 3 (Traslados Finales)
         row_b3 = ttk.Frame(card_batch)
         row_b3.pack(fill=tk.X)
         ttk.Button(
             row_b3,
-            text="📦 3A. Mover TODAS las Apartadas (por Subcarpeta de Error)",
-            style="Warning.TButton",
-            command=self.run_step3_move_apartados_async
+            text="✅ 3A. Mover TODAS las Correctas (COINCIDE TOTAL) a Dir. Correctos",
+            style="Success.TButton",
+            command=self.run_step3_move_correctos_async
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_b3,
-            text="✅ 3B. Mover TODAS las Correctas (COINCIDE TOTAL) a Dir. Correctos",
-            style="Success.TButton",
-            command=self.run_step3_move_correctos_async
+            text="📦 3B. Mover TODAS las Apartadas (por Subcarpeta de Error)",
+            style="Warning.TButton",
+            command=self.run_step3_move_apartados_async
         ).pack(side=tk.LEFT)
 
         # --- TARJETA 3: Trazabilidad MySQL, Estadísticas y Rollback por Lote ---
@@ -3820,6 +3849,103 @@ class OCRLibrosApp(tk.Tk):
 
         self._run_exclusive_in_thread("Analizando estructura de carpetas (Paso 2C)", lambda: self.service.planificar_paso2_estructura(root_p), _plan_done)
 
+    def run_batch_rename_discrepancies_async(self):
+        """
+        Paso 2E: Renombra en lote todas las carpetas con discrepancia (o ceros)
+        cuyos datos fueron detectados válidamente en la carátula por la IA o corregidos por el usuario.
+        Al renombrarse, pasan a COINCIDE_TOTAL (Listas/Correctas) para ser trasladadas a Validados.
+        Todo queda respaldado en MySQL con soporte de Rollback.
+        """
+        targets = [
+            r for r in self.all_folder_items
+            if r.get("needs_rename", False)
+            and r.get("codigo_base_sugerido")
+            and r.get("veredicto_global") not in (
+                "PENDIENTE_DIAGNOSTICO", "APARTAR_CARATULA_BLANCA", "SIN_ARCHIVO_CARATULA",
+                "DISCREPANCIA_SIN_CARATULA", "ERROR", "MOVIDO_A_APARTADOS", "MOVIDO_A_CORRECTOS"
+            )
+        ]
+        if not targets:
+            messagebox.showinfo(
+                "Sin Discrepancias para Corregir",
+                "No hay carpetas diagnosticadas con cambio de nombre sugerido pendiente de aplicar.",
+                parent=self
+            )
+            return
+
+        sample = targets[:8]
+        lines = [f"  • {Path(r.get('folder_path', '')).name} -> {r.get('codigo_base_sugerido')}" for r in sample]
+        msg = (
+            "PASO 2E: CORREGIR Y RENOMBRAR DISCREPANCIAS\n\n"
+            f"Se aplicará el código validado de la carátula a {len(targets)} carpeta(s) y sus PDFs internos.\n\n"
+            "• Al renombrarse, pasarán a '✔ Listas / Correctas (COINCIDE TOTAL)' para ir a Validados.\n"
+            "• Las carpetas con archivos DUP o REG seguirán requiriendo revisión.\n"
+            "• 100% Auditado en MySQL con soporte de Rollback total.\n\n"
+            + ("Ejemplos:\n" + "\n".join(lines) if lines else "")
+            + ("\n  ... y más." if len(targets) > 8 else "")
+            + "\n\n¿Deseas aplicar las correcciones ahora?"
+        )
+        if not messagebox.askyesno("Confirmar Corrección de Discrepancias", msg, parent=self):
+            return
+
+        def _work():
+            ejec_id = self.mysql_manager.crear_ejecucion_lote(
+                tipo_ejecucion="CORRECCION_DISCREPANCIAS_RENOMBRADO",
+                detalles={"total_candidatos": len(targets)}
+            ) if (self.mysql_manager and self.mysql_manager.enabled) else None
+
+            renombradas = 0
+            archivos_totales = 0
+            errores: List[str] = []
+
+            for idx, r in enumerate(targets, start=1):
+                fname = Path(r.get("folder_path", "")).name
+                self.after(0, self._update_async_status, idx, len(targets), f"Corrigiendo [{idx}/{len(targets)}]: {fname}")
+                try:
+                    res = self.service.execute_folder_and_pdfs_rename(r, ejecucion_id=ejec_id)
+                    renombradas += 1
+                    archivos_totales += res.get("files_renamed_count", 0)
+                except Exception as exc:
+                    errores.append(f"{fname}: {exc}")
+
+            if ejec_id is not None:
+                self.mysql_manager.finalizar_ejecucion_lote(
+                    ejecucion_id=ejec_id,
+                    total_carpetas=renombradas,
+                    total_archivos=archivos_totales,
+                    estado="COMPLETADO" if not errores else "COMPLETADO_CON_ERRORES",
+                    detalles={"errores": errores[:20]} if errores else None
+                )
+
+            return {
+                "ejecucion_id": ejec_id,
+                "renombradas": renombradas,
+                "archivos": archivos_totales,
+                "errores": errores
+            }
+
+        def _done(res, err):
+            self._refresh_master_table()
+            self.refresh_execution_history()
+            self._refresh_header_badge()
+            if err:
+                messagebox.showerror("Error al Corregir Discrepancias", f"{err}", parent=self)
+                return
+            msg_ok = (
+                f"Corrección de Discrepancias Finalizada (Lote #{res.get('ejecucion_id')}):\n\n"
+                f"• Carpetas corregidas y renombradas: {res.get('renombradas', 0)} de {len(targets)}\n"
+                f"• Archivos PDF actualizados: {res.get('archivos', 0)}\n\n"
+                "Las carpetas corregidas han pasado a '✔ Listas / Correctas (COINCIDE TOTAL)' "
+                "y están listas para ser trasladadas a Dir. Correctos con el Paso 3."
+            )
+            if res.get("errores"):
+                msg_ok += f"\n\nAvisos ({len(res['errores'])}):\n" + "\n".join(res["errores"][:5])
+                messagebox.showwarning("Finalizado con Avisos", msg_ok, parent=self)
+            else:
+                messagebox.showinfo("Discrepancias Corregidas", msg_ok, parent=self)
+
+        self._run_exclusive_in_thread("Corrigiendo y renombrando discrepancias", _work, _done)
+
     def _run_step3(self, mode: str, target_dir: str, label: str):
         def _work():
             return self.service.ejecutar_paso3_trasladar_lote(
@@ -3866,7 +3992,8 @@ class OCRLibrosApp(tk.Tk):
         self._run_step3("APARTADOS", apartados_dir, "Apartados")
 
     def _on_step3_finished(self, dest_label: str, res: Dict[str, Any]):
-        self._refresh_all_tabs()
+        self.reload_root_preview()
+        self._refresh_master_table()
         self.refresh_execution_history()
         self._refresh_header_badge()
         messagebox.showinfo(
@@ -3877,6 +4004,10 @@ class OCRLibrosApp(tk.Tk):
             f"• Errores: {len(res.get('errores', []))}",
             parent=self
         )
+
+    def _refresh_all_tabs(self):
+        """Refresca la tabla maestra y los contadores de todas las pestañas."""
+        self._refresh_master_table()
 
     def refresh_execution_history(self):
         """Recarga la tabla del Historial de Ejecuciones desde MySQL."""
@@ -5235,31 +5366,7 @@ class OCRLibrosApp(tk.Tk):
         )
 
     def batch_rename_all_discrepancies(self):
-        targets = [
-            r for r in self.all_folder_items
-            if r.get("needs_rename", False)
-            and r.get("veredicto_global") not in ("PENDIENTE_DIAGNOSTICO", "APARTAR_CARATULA_BLANCA", "SIN_ARCHIVO_CARATULA", "DISCREPANCIA_SIN_CARATULA", "ERROR")
-        ]
-        if not targets:
-            messagebox.showinfo(
-                "Sin Carpetas para Renombrar",
-                "No hay carpetas diagnosticadas con cambio de nombre sugerido listo para aplicar."
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Confirmar Renombrado Masivo",
-            f"Se renombrarán {len(targets)} carpeta(s) y sus archivos PDF internos usando el código sugerido hasta el año "
-            "(agregando _2, _3 solo a la carpeta en caso de colisión).\n\n"
-            "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
-        ):
-            return
-
-        self._run_async_batch_operation(
-            op_title="Renombrado Masivo",
-            targets=targets,
-            worker_func=lambda r: self.service.execute_folder_and_pdfs_rename(r)
-        )
+        self.run_batch_rename_discrepancies_async()
 
     def batch_move_all_blank_caratulas(self):
         targets = [r for r in self.all_folder_items if r.get("needs_apartar", False)]
