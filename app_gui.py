@@ -2700,6 +2700,8 @@ class OCRLibrosApp(tk.Tk):
         tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
         tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
         tools_menu.add_separator()
+        tools_menu.add_command(label="🚚 Reubicar Carpeta(s) Seleccionada(s) con Trazabilidad...", command=self.reubicar_seleccionadas)
+        tools_menu.add_separator()
         tools_menu.add_command(label="🗄 Conexión MySQL & Crear Tablas (5 Tablas)...", command=self.open_mysql_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="⏪ Revertir Última Ejecución (Rollback Lote)...", command=self.trigger_rollback_last_batch)
@@ -2958,6 +2960,12 @@ class OCRLibrosApp(tk.Tk):
             style="Info.TButton",
             command=self.reanalyze_selected_folder
         ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_s1,
+            text="🚚 Reubicar Seleccionada(s)...",
+            style="Action.TButton",
+            command=self.reubicar_seleccionadas
+        ).pack(side=tk.LEFT, padx=(0, 6))
 
         row_s2 = ttk.Frame(card_single)
         row_s2.pack(fill=tk.X)
@@ -3197,6 +3205,7 @@ class OCRLibrosApp(tk.Tk):
         self.tree_done.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_done.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_done.bind("<<TreeviewSelect>>", lambda e: self._on_folder_selected(e, self.tree_done))
+        self.tree_done.bind("<Button-3>", lambda e: self._show_tree_context_menu(e, self.tree_done))
 
         # Pestaña 5: Historial de Ejecuciones y Rollback por Lote (MySQL)
         audit_toolbar = ttk.Frame(self.tab_audit)
@@ -4283,6 +4292,7 @@ class OCRLibrosApp(tk.Tk):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         tree.bind("<<TreeviewSelect>>", lambda e, t=tree: self._on_folder_selected(e, t))
         tree.bind("<Double-1>", lambda e, t=tree: self.open_manual_edit_dialog())
+        tree.bind("<Button-3>", lambda e, t=tree: self._show_tree_context_menu(e, t))
         return tree
 
     def _on_tab_changed(self, event=None):
@@ -4787,6 +4797,142 @@ class OCRLibrosApp(tk.Tk):
             if s and s[0] in self.results_by_iid:
                 return self.results_by_iid.get(s[0])
         return None
+
+    def _get_selected_results_list(self) -> List[Dict[str, Any]]:
+        """Retorna la lista de resultados para todos los elementos seleccionados en el árbol activo."""
+        cur_tree = getattr(self, "active_tree", self.tree_folders)
+        selected_iids = cur_tree.selection() if cur_tree else ()
+        results: List[Dict[str, Any]] = []
+
+        if selected_iids:
+            for iid in selected_iids:
+                r = self.results_by_iid.get(iid)
+                if r and r not in results:
+                    results.append(r)
+            if results:
+                return results
+
+        # Fallback si el árbol activo no tiene selección
+        for fallback_t in (self.tree_folders, self.tree_pending, self.tree_ready, self.tree_done):
+            if fallback_t:
+                s = fallback_t.selection()
+                if s:
+                    for iid in s:
+                        r = self.results_by_iid.get(iid)
+                        if r and r not in results:
+                            results.append(r)
+                    if results:
+                        return results
+        return []
+
+    def _show_tree_context_menu(self, event, tree: ttk.Treeview):
+        """Muestra el menú contextual al hacer clic derecho en las tablas de carpetas."""
+        self.active_tree = tree
+        row_id = tree.identify_row(event.y)
+        if row_id:
+            current_sel = tree.selection()
+            if row_id not in current_sel:
+                tree.selection_set(row_id)
+            self._on_folder_selected(None, tree)
+
+        sel = tree.selection()
+        count = len(sel)
+
+        menu = tk.Menu(self, tearoff=0)
+        label_reub = f"🚚 Reubicar ({count}) Carpeta(s)..." if count > 1 else "🚚 Reubicar Carpeta..."
+        menu.add_command(label=label_reub, command=self.reubicar_seleccionadas, state=tk.NORMAL if count > 0 else tk.DISABLED)
+        menu.add_separator()
+        menu.add_command(label="📂 Abrir en Explorador", command=self.open_selected_folder_in_explorer, state=tk.NORMAL if count > 0 else tk.DISABLED)
+        menu.add_command(label="📝 Editar Campos Manualmente...", command=self.open_manual_edit_dialog, state=tk.NORMAL if count > 0 else tk.DISABLED)
+        menu.add_command(label="🔍 Re-analizar Carpeta", command=self.reanalyze_selected_folder, state=tk.NORMAL if count > 0 else tk.DISABLED)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def reubicar_seleccionadas(self):
+        """
+        Herramienta General de Reubicación de Carpetas con Trazabilidad Total en MySQL:
+        Mueve las carpetas seleccionadas al directorio destino especificado por el usuario,
+        omitiendo cualquier carpeta que ya exista en el destino para prevenir colisiones,
+        y registrando la auditoría completa en MySQL como un lote revertible.
+        """
+        selected_results = self._get_selected_results_list()
+        if not selected_results:
+            messagebox.showwarning("Reubicar Carpetas", "Selecciona al menos una carpeta de la tabla para reubicar.", parent=self)
+            return
+
+        folder_paths = [Path(r["folder_path"]) for r in selected_results if r.get("folder_path")]
+        if not folder_paths:
+            messagebox.showwarning("Reubicar Carpetas", "No se encontraron rutas válidas para las carpetas seleccionadas.", parent=self)
+            return
+
+        initial_dir = self.path_var.get().strip() or str(folder_paths[0].parent)
+        dest_dir_str = filedialog.askdirectory(
+            title=f"Seleccionar directorio destino para reubicar {len(folder_paths)} carpeta(s)",
+            initialdir=initial_dir,
+            parent=self,
+        )
+        if not dest_dir_str:
+            return
+
+        dest_dir = Path(dest_dir_str).resolve()
+        if not dest_dir.exists() or not dest_dir.is_dir():
+            messagebox.showerror("Directorio Inválido", f"La ruta seleccionada no es un directorio válido:\n{dest_dir}", parent=self)
+            return
+
+        def _work():
+            return self.service.reubicar_carpetas_lote(
+                folder_paths=folder_paths,
+                dest_dir=dest_dir,
+                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+            )
+
+        def _on_done(res, err):
+            if err:
+                messagebox.showerror("Error en Reubicación", f"Ocurrió un error al reubicar carpetas:\n{err}", parent=self)
+                return
+
+            movidas = res.get("movidas", 0)
+            archivos_movidos = res.get("archivos_movidos", 0)
+            conflictos = res.get("omitidas_conflicto", [])
+            errores = res.get("errores", [])
+            ejec_id = res.get("ejecucion_id")
+
+            # Actualizar estado de ubicación para las tablas
+            root_p = Path(self.path_var.get().strip()).resolve() if self.path_var.get().strip() else None
+            for r in selected_results:
+                curr_p = Path(r.get("folder_path", "")).resolve()
+                if root_p and curr_p.parent == root_p:
+                    r["moved_destination_type"] = ""
+                else:
+                    r["moved_destination_type"] = "REUBICADA"
+
+            self._refresh_master_table()
+            self._refresh_header_badge()
+            self.refresh_execution_history()
+
+            msg_lines = [
+                f"Lote de Reubicación #{ejec_id or 'S/N'} Finalizado:",
+                f"• Directorio destino: {dest_dir}",
+                f"• Carpetas movidas con éxito: {movidas}",
+                f"• Archivos PDF movidos: {archivos_movidos}",
+            ]
+            if conflictos:
+                msg_lines.append(f"\n⚠ Omitidas por conflicto ({len(conflictos)} ya existían en destino):")
+                for c in conflictos[:10]:
+                    msg_lines.append(f"  - {c}")
+                if len(conflictos) > 10:
+                    msg_lines.append(f"  ... y {len(conflictos) - 10} más.")
+
+            if errores:
+                msg_lines.append(f"\n❌ Errores ({len(errores)}):")
+                for e in errores[:10]:
+                    msg_lines.append(f"  - {e}")
+
+            if movidas > 0:
+                msg_lines.append("\n✅ Movimiento registrado con 100% trazabilidad. Puedes revertirlo si lo deseas desde el botón de Rollback.")
+
+            messagebox.showinfo("Reubicación de Carpetas", "\n".join(msg_lines), parent=self)
+
+        self.run_exclusive_async(f"Reubicando {len(folder_paths)} carpeta(s)", _work, _on_done)
 
     def _on_folder_selected(self, event=None, source_tree: Optional[ttk.Treeview] = None):
         if source_tree is not None:

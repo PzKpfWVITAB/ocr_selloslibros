@@ -1956,6 +1956,194 @@ class FolderOCRService:
             "errores": errors,
         }
 
+    @exclusive_op("Reubicar carpetas")
+    def reubicar_carpetas_lote(
+        self,
+        folder_paths: List[Any],
+        dest_dir: Any,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Herramienta General de Reubicación de Carpetas con Trazabilidad Total en MySQL:
+        - Omite cualquier carpeta que ya exista con el mismo nombre en dest_dir para evitar colisiones.
+        - Crea un lote en `ejecuciones_lotes` con tipo 'REUBICACION_CARPETAS'.
+        - Registra el movimiento de cada carpeta y de todos sus archivos PDF vinculados a su UUID.
+        - Si ocurre un fallo físico o de base de datos durante el traslado de una carpeta, ejecuta
+          una reversión compensatoria física inmediata para dejar la carpeta en su origen intacta.
+        - Actualiza las rutas internas en self.results_data si aplica.
+        """
+        self.reload_settings()
+        dest_path = Path(dest_dir).resolve()
+        dest_path.mkdir(parents=True, exist_ok=True)
+
+        valid_folders: List[Path] = []
+        for p in folder_paths:
+            fp = Path(p).resolve()
+            if fp.exists() and fp.is_dir():
+                valid_folders.append(fp)
+
+        if not valid_folders:
+            return {
+                "ejecucion_id": None,
+                "total_solicitadas": len(folder_paths),
+                "movidas": 0,
+                "archivos_movidos": 0,
+                "omitidas_conflicto": [],
+                "errores": ["No se proporcionaron carpetas válidas existentes para mover."],
+                "destino": str(dest_path),
+            }
+
+        to_move: List[Path] = []
+        omitidas_conflicto: List[str] = []
+
+        for sf in valid_folders:
+            target = (dest_path / sf.name).resolve()
+            if target == sf:
+                omitidas_conflicto.append(f"{sf.name}: La carpeta ya se encuentra en el directorio destino.")
+                continue
+            if target.exists():
+                omitidas_conflicto.append(f"{sf.name}: Ya existe una carpeta con el mismo nombre en el destino.")
+                continue
+            to_move.append(sf)
+
+        if not to_move:
+            return {
+                "ejecucion_id": None,
+                "total_solicitadas": len(valid_folders),
+                "movidas": 0,
+                "archivos_movidos": 0,
+                "omitidas_conflicto": omitidas_conflicto,
+                "errores": [],
+                "destino": str(dest_path),
+            }
+
+        ejecucion_id = None
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            ejecucion_id = self.mysql.crear_ejecucion_lote(
+                tipo_ejecucion="REUBICACION_CARPETAS",
+                detalles={
+                    "destino": str(dest_path),
+                    "total_solicitadas": len(valid_folders),
+                    "a_mover": len(to_move),
+                    "omitidas_conflicto": len(omitidas_conflicto),
+                },
+            )
+
+        movidas = 0
+        archivos_movidos = 0
+        errors: List[str] = []
+        total = len(to_move)
+
+        for idx, sf in enumerate(to_move, start=1):
+            fname = sf.name
+            if progress_cb:
+                progress_cb(idx, total, f"Reubicando ({idx}/{total}): {fname}")
+
+            target = (dest_path / fname).resolve()
+            old_str = str(sf)
+            dest_str = str(target)
+
+            c_uuid = None
+            if self.mysql and getattr(self.mysql, "enabled", False):
+                c_uuid = self.mysql.obtener_uuid_por_ruta_o_nombre(old_str, fname)
+
+            pdfs = [f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"]
+            n_pdfs = len(pdfs)
+            pdf_items = [
+                {
+                    "name": p.name,
+                    "old_path": str(p.resolve()),
+                    "new_path": str((target / p.name).resolve()),
+                    "pages": FileOperations.get_pdf_page_count(p),
+                }
+                for p in pdfs
+            ]
+
+            try:
+                safe_move(sf, target)
+            except Exception as mv_exc:
+                errors.append(f"{fname}: Error físico al mover: {mv_exc}")
+                logger.error(f"Fallo al mover físicamente carpeta '{fname}' a '{target}': {mv_exc}", exc_info=True)
+                continue
+
+            # Registro en MySQL con compensación física ante fallos
+            try:
+                if self.mysql and getattr(self.mysql, "enabled", False) and ejecucion_id is not None and c_uuid:
+                    self.mysql.registrar_movimiento_carpeta(
+                        ejecucion_id=ejecucion_id,
+                        carpeta_uuid=c_uuid,
+                        tipo_accion="REUBICACION_CARPETA",
+                        nombre_anterior=fname,
+                        nombre_nuevo=fname,
+                        ruta_anterior=old_str,
+                        ruta_nueva=dest_str,
+                        cantidad_archivos=n_pdfs,
+                    )
+                    if pdf_items:
+                        file_logs = [
+                            {
+                                "ejecucion_id": ejecucion_id,
+                                "carpeta_uuid": c_uuid,
+                                "tipo_accion": "REUBICACION_ARCHIVO",
+                                "nombre_anterior": item["name"],
+                                "nombre_nuevo": item["name"],
+                                "ruta_anterior": item["old_path"],
+                                "ruta_nueva": item["new_path"],
+                                "cantidad_paginas": item["pages"],
+                            }
+                            for item in pdf_items
+                        ]
+                        self.mysql.registrar_movimientos_archivos_lote(file_logs)
+            except Exception as log_exc:
+                logger.error(f"Fallo al registrar trazabilidad en MySQL para '{fname}': {log_exc}. Revirtiendo traslado físico...", exc_info=True)
+                try:
+                    safe_move(target, sf)
+                except Exception as undo_exc:
+                    logger.critical(f"Error crítico devolviendo {target} a {sf}: {undo_exc}")
+                errors.append(f"{fname}: Error al registrar en MySQL ({log_exc}). Se revirtió el traslado físico.")
+                continue
+
+            # Actualizar en memoria self.results_data
+            for res_item in self.results_data:
+                curr_p_str = res_item.get("folder_path", "")
+                if curr_p_str and Path(curr_p_str).resolve() == sf:
+                    res_item["folder_path"] = dest_str
+                    insp = res_item.get("caratula_inspection", {})
+                    if insp and insp.get("caratula_path"):
+                        c_p = Path(insp["caratula_path"])
+                        if c_p.parent.resolve() == sf:
+                            insp["caratula_path"] = str((target / c_p.name).resolve())
+                    actions = list(res_item.get("applied_actions", []))
+                    actions.append(f"🚚 Reubicada a {dest_path.name}/{fname}")
+                    res_item["applied_actions"] = actions
+                    res_item["last_action"] = f"🚚 Reubicada a {dest_path.name}"
+
+            movidas += 1
+            archivos_movidos += n_pdfs
+
+        if self.mysql and getattr(self.mysql, "enabled", False) and ejecucion_id is not None:
+            self.mysql.finalizar_ejecucion_lote(
+                ejecucion_id=ejecucion_id,
+                total_carpetas=movidas,
+                total_archivos=archivos_movidos,
+                estado="COMPLETADO" if not errors else ("COMPLETADO_CON_ERRORES" if movidas > 0 else "FALLIDO"),
+                detalles={
+                    "destino": str(dest_path),
+                    "errores": errors[:20],
+                    "omitidas_conflicto": omitidas_conflicto[:50],
+                },
+            )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "total_solicitadas": len(valid_folders),
+            "movidas": movidas,
+            "archivos_movidos": archivos_movidos,
+            "omitidas_conflicto": omitidas_conflicto,
+            "errores": errors,
+            "destino": str(dest_path),
+        }
+
     def obtener_historial_ejecuciones(self) -> List[Dict[str, Any]]:
         return self.mysql.obtener_historial_ejecuciones()
 
