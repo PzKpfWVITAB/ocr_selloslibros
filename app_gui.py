@@ -2072,7 +2072,31 @@ class DryRunPaso2Dialog(tk.Toplevel):
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # 6. Barra de Botones Inferior
+        # 6. Barra de Acciones Pre-IA (0 Tokens Gastados, 100% MySQL)
+        action_bar = ttk.LabelFrame(container, text=" ⚡ Acciones Pre-IA Inmediatas (0 Tokens Gastados, 100% MySQL & Rollback) ", padding=6)
+        action_bar.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Button(
+            action_bar,
+            text="📦 Apartar Discrepantes Ahora (0 Tokens)",
+            style="Warning.TButton",
+            command=self._action_apartar_discrepantes
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            action_bar,
+            text="✅ Auditar Correctas en MySQL (0 Tokens)",
+            style="Success.TButton",
+            command=self._action_auditar_correctos
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            action_bar,
+            text="📁 Mover Correctas a Validados",
+            command=self._action_mover_validados
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        # 7. Barra de Botones Inferior
         bot_bar = ttk.Frame(container)
         bot_bar.pack(fill=tk.X)
 
@@ -2155,6 +2179,178 @@ class DryRunPaso2Dialog(tk.Toplevel):
         self.destroy()
         self.parent_app.path_var.set(root_path)
         self.parent_app.start_analysis()
+
+    def _action_apartar_discrepantes(self):
+        root_path = self.path_var.get().strip()
+        if not root_path or not os.path.isdir(root_path):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        cant_apartados = self.plan_result.get("apartados", 0)
+        if cant_apartados == 0:
+            messagebox.showinfo("Paso 2A", "No hay carpetas con estructura discrepante para apartar.", parent=self)
+            return
+
+        apartados_dir = self.parent_app.apartados_var.get().strip()
+        if not apartados_dir:
+            self.parent_app.browse_apartados_dir()
+            apartados_dir = self.parent_app.apartados_var.get().strip()
+            if not apartados_dir:
+                messagebox.showwarning("Falta Directorio", "Configura primero el directorio de 'Apartados'.", parent=self)
+                return
+
+        dest_preview = os.path.join(apartados_dir, "ESTRUCTURA_DISCREPANTE")
+        if not messagebox.askyesno(
+            "Confirmar Paso 2A: Apartar Estructura Discrepante",
+            f"Se moverán {cant_apartados} carpeta(s) con estructura discrepante o archivos REG a:\n"
+            f"{dest_preview}\n\n"
+            "• 0 Tokens de IA consumidos (análisis de patrón de nombres)\n"
+            "• Registrado en MySQL con soporte de Rollback total\n\n"
+            "¿Deseas mover las carpetas ahora?",
+            parent=self
+        ):
+            return
+
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        def _work():
+            return self.parent_app.service.ejecutar_paso2a_apartar_estructura(
+                root_path, apartados_dir,
+                progress_cb=lambda i, t, msg: self.parent_app.after(0, self.parent_app._update_async_status, i, t, msg)
+            )
+
+        def _done(res, err):
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+            if err:
+                messagebox.showerror("Error en Paso 2A", f"Ocurrió un error: {err}", parent=self)
+            else:
+                messagebox.showinfo(
+                    "Paso 2A Completado",
+                    f"Se apartaron {res.get('movidas', 0)} carpeta(s) con éxito.\nLote #{res.get('ejecucion_id')} registrado en MySQL.",
+                    parent=self
+                )
+            self._scan_preview()
+            self.parent_app.reload_root_preview()
+            self.parent_app.refresh_execution_history()
+
+        self.parent_app._run_exclusive_in_thread("Paso 2A: Apartando estructura discrepante", _work, _done)
+
+    def _action_auditar_correctos(self):
+        root_path = self.path_var.get().strip()
+        if not root_path or not os.path.isdir(root_path):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        cant_correctos = self.plan_result.get("correctos", 0)
+        if cant_correctos == 0:
+            messagebox.showinfo("Paso 2B", "No hay carpetas correctas para auditar.", parent=self)
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Paso 2B: Auditar Correctas en MySQL",
+            f"Se convalidarán y auditarán en MySQL {cant_correctos} carpeta(s) correctas (con carátula embebida).\n\n"
+            "• Estado asignado: CONVALIDADO_CARATULA_EMBEBIDA\n"
+            "• 0 Tokens de IA consumidos\n"
+            "• No se mueven archivos físicamente en este paso\n\n"
+            "¿Deseas registrar la convalidación en MySQL?",
+            parent=self
+        ):
+            return
+
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        def _work():
+            return self.parent_app.service.ejecutar_paso2b_auditar_correctos(
+                root_path,
+                progress_cb=lambda i, t, msg: self.parent_app.after(0, self.parent_app._update_async_status, i, t, msg)
+            )
+
+        def _done(res, err):
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+            if err:
+                messagebox.showerror("Error en Paso 2B", f"Ocurrió un error: {err}", parent=self)
+            else:
+                messagebox.showinfo(
+                    "Paso 2B Completado",
+                    f"Se auditaron y convalidaron {res.get('auditadas', 0)} carpeta(s) en MySQL.\nLote #{res.get('ejecucion_id')} registrado.",
+                    parent=self
+                )
+            self._scan_preview()
+            self.parent_app.refresh_execution_history()
+
+        self.parent_app._run_exclusive_in_thread("Paso 2B: Auditando carpetas correctas", _work, _done)
+
+    def _action_mover_validados(self):
+        root_path = self.path_var.get().strip()
+        if not root_path or not os.path.isdir(root_path):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        validados_dir = self.parent_app.validados_var.get().strip()
+        if not validados_dir:
+            self.parent_app.browse_validados_dir()
+            validados_dir = self.parent_app.validados_var.get().strip()
+            if not validados_dir:
+                messagebox.showwarning("Falta Directorio", "Configura primero el directorio de 'Correctos'.", parent=self)
+                return
+
+        cant_correctos = self.plan_result.get("correctos", 0)
+        if cant_correctos == 0:
+            messagebox.showinfo("Paso 2C", "No hay carpetas correctas en la raíz para trasladar a Validados.", parent=self)
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar Paso 2C: Trasladar a Validados",
+            f"Se moverán físicamente {cant_correctos} carpeta(s) correctas a:\n{validados_dir}\n\n"
+            "• Deja en la raíz ÚNICAMENTE las carpetas que requieren análisis con IA\n"
+            "• 0 Tokens de IA consumidos\n"
+            "• Registrado en MySQL con soporte de Rollback total\n\n"
+            "¿Deseas mover las carpetas ahora?",
+            parent=self
+        ):
+            return
+
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        def _work():
+            return self.parent_app.service.ejecutar_traslado_validados(
+                root_path, validados_dir,
+                progress_cb=lambda i, t, msg: self.parent_app.after(0, self.parent_app._update_async_status, i, t, msg)
+            )
+
+        def _done(res, err):
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+            if err:
+                messagebox.showerror("Error en Paso 2C", f"Ocurrió un error: {err}", parent=self)
+            else:
+                messagebox.showinfo(
+                    "Paso 2C Completado",
+                    f"Se trasladaron {res.get('movidas', 0)} carpeta(s) a Validados con éxito.\nLote #{res.get('ejecucion_id')} registrado en MySQL.",
+                    parent=self
+                )
+            self._scan_preview()
+            self.parent_app.reload_root_preview()
+            self.parent_app.refresh_execution_history()
+
+        self.parent_app._run_exclusive_in_thread("Paso 2C: Trasladando validadas a destino", _work, _done)
 
 
 class FolderSeparatorDialog(tk.Toplevel):
@@ -2470,7 +2666,10 @@ class OCRLibrosApp(tk.Tk):
         tools_menu.add_command(label="📁 Paso 1: Indexar en MySQL y Renombrar por 1er PDF", command=self.run_step1_index_and_rename_async)
         tools_menu.add_separator()
         tools_menu.add_command(label="🧪 Simular Estructura Pre-IA (Dry-Run 0 Tokens)...", command=self.open_step2_dry_run_dialog)
-        tools_menu.add_command(label="🔍 Paso 2: Chequeo de Estructura + Diagnóstico General", command=self.start_analysis)
+        tools_menu.add_command(label="📦 Paso 2A: Apartar Discrepantes (0 Tokens)", command=self.run_step2a_apartar_async)
+        tools_menu.add_command(label="✅ Paso 2B: Auditar Correctas en MySQL (0 Tokens)", command=self.run_step2b_auditar_async)
+        tools_menu.add_command(label="📁 Paso 2C: Mover Correctas a Validados", command=self.run_step2c_trasladar_validadas_async)
+        tools_menu.add_command(label="🔍 Paso 2D: Diagnóstico General con IA (Restantes)", command=self.start_analysis)
         tools_menu.add_separator()
         tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
         tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
@@ -2796,7 +2995,7 @@ class OCRLibrosApp(tk.Tk):
             command=self.run_step1_index_and_rename_async
         ).pack(side=tk.LEFT)
 
-        # Fila 2: Paso 2
+        # Fila 2: Paso 2 (Pre-IA y Diagnóstico)
         row_b2 = ttk.Frame(card_batch)
         row_b2.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
@@ -2806,7 +3005,24 @@ class OCRLibrosApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_b2,
-            text="🔍 2. Ejecutar Diagnóstico General (IA)",
+            text="📦 2A. Apartar Discrepantes (0 Tokens)",
+            style="Warning.TButton",
+            command=self.run_step2a_apartar_async
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="✅ 2B. Auditar Correctas (0 Tokens)",
+            style="Success.TButton",
+            command=self.run_step2b_auditar_async
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="📁 2C. Mover Correctas a Validados",
+            command=self.run_step2c_trasladar_validadas_async
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="🔍 2D. Diagnóstico IA (Restantes)",
             style="Action.TButton",
             command=self.start_analysis
         ).pack(side=tk.LEFT)
@@ -3389,6 +3605,220 @@ class OCRLibrosApp(tk.Tk):
             messagebox.showwarning("Paso 1 con Avisos", msg, parent=self)
         else:
             messagebox.showinfo("Paso 1 Completado", msg, parent=self)
+
+    def run_step2a_apartar_async(self, on_success=None):
+        """
+        Paso 2A (Pre-IA - 0 Tokens): Mueve carpetas con estructura discrepante o archivos REG
+        a apartados_dir / 'ESTRUCTURA_DISCREPANTE', registrando todo en MySQL con soporte de Rollback.
+        """
+        root_p = self.path_var.get().strip()
+        if not root_p or not os.path.isdir(root_p):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        apartados_dir = self.apartados_var.get().strip()
+        if not apartados_dir:
+            self.browse_apartados_dir()
+            apartados_dir = self.apartados_var.get().strip()
+            if not apartados_dir:
+                messagebox.showwarning("Falta Directorio", "Configura primero el directorio de 'Apartados'.", parent=self)
+                return
+
+        def _plan_done(plan, err):
+            if err:
+                messagebox.showerror("Paso 2A", f"No se pudo analizar la estructura: {err}", parent=self)
+                return
+
+            apartados_count = plan.get("apartados", 0)
+            if apartados_count == 0:
+                messagebox.showinfo("Paso 2A: Apartar Estructura", "No se detectaron carpetas con estructura discrepante ni archivos REG para apartar.", parent=self)
+                return
+
+            sample = [i for i in plan.get("items", []) if i.get("clasificacion") == "APARTADOS"][:8]
+            lines = [f"  • {i['carpeta']} -> {i['motivo']}" for i in sample]
+            dest_preview = os.path.join(apartados_dir, "ESTRUCTURA_DISCREPANTE")
+            msg = (
+                "PASO 2A: APARTAR ESTRUCTURA DISCREPANTE (0 TOKENS)\n\n"
+                f"• Carpetas discrepantes detectadas: {apartados_count}\n"
+                f"• Destino: {dest_preview}\n"
+                "• 0 Tokens de IA consumidos (filtro estructural puro).\n"
+                "• Se registrará en MySQL con soporte de Rollback total.\n\n"
+                + ("Ejemplos:\n" + "\n".join(lines) if lines else "")
+                + "\n\n¿Deseas mover las carpetas ahora?"
+            )
+            if not messagebox.askyesno("Confirmar Paso 2A", msg, parent=self):
+                return
+
+            def _work():
+                return self.service.ejecutar_paso2a_apartar_estructura(
+                    root_p, apartados_dir,
+                    progress_cb=lambda i, t, m: self.after(0, self._update_async_status, i, t, m)
+                )
+
+            def _done(res, w_err):
+                if w_err:
+                    self.reload_root_preview()
+                    self.refresh_execution_history()
+                    messagebox.showerror("Error Paso 2A", f"{w_err}\n\nSi se movieron carpetas, el lote está registrado y puede revertirse.", parent=self)
+                    return
+                self.reload_root_preview()
+                self.refresh_execution_history()
+                self._refresh_header_badge()
+                messagebox.showinfo(
+                    "Paso 2A Completado",
+                    f"Paso 2A finalizado (Lote #{res.get('ejecucion_id')}):\n"
+                    f"• Carpetas movidas a ESTRUCTURA_DISCREPANTE: {res.get('movidas', 0)}\n\n"
+                    "Puedes revertir esta operación en cualquier momento desde el Historial.",
+                    parent=self
+                )
+                if on_success:
+                    try:
+                        on_success()
+                    except Exception:
+                        pass
+
+            self._run_exclusive_in_thread("Paso 2A: Apartando estructura discrepante", _work, _done)
+
+        self._run_exclusive_in_thread("Analizando estructura de carpetas (Paso 2A)", lambda: self.service.planificar_paso2_estructura(root_p), _plan_done)
+
+    def run_step2b_auditar_async(self, on_success=None):
+        """
+        Paso 2B (Pre-IA - 0 Tokens): Convalida y audita en MySQL carpetas homogéneas con carátula embebida
+        sin moverlas físicamente aún.
+        """
+        root_p = self.path_var.get().strip()
+        if not root_p or not os.path.isdir(root_p):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        def _plan_done(plan, err):
+            if err:
+                messagebox.showerror("Paso 2B", f"No se pudo analizar la estructura: {err}", parent=self)
+                return
+
+            correctos_count = plan.get("correctos", 0)
+            if correctos_count == 0:
+                messagebox.showinfo("Paso 2B: Auditar Correctas", "No se detectaron carpetas correctas homogéneas para auditar.", parent=self)
+                return
+
+            sample = [i for i in plan.get("items", []) if i.get("clasificacion") == "CORRECTOS"][:8]
+            lines = [f"  • {i['carpeta']} ({i['total_pdfs']} PDFs)" for i in sample]
+            msg = (
+                "PASO 2B: AUDITAR CORRECTAS EN MYSQL (0 TOKENS)\n\n"
+                f"• Carpetas homogéneas detectadas: {correctos_count}\n"
+                "• Estado a registrar: CONVALIDADO_CARATULA_EMBEBIDA\n"
+                "• 0 Tokens de IA consumidos.\n"
+                "• No se moverán físicamente en este paso (auditoría en MySQL).\n\n"
+                + ("Ejemplos:\n" + "\n".join(lines) if lines else "")
+                + "\n\n¿Deseas registrar la auditoría en MySQL?"
+            )
+            if not messagebox.askyesno("Confirmar Paso 2B", msg, parent=self):
+                return
+
+            def _work():
+                return self.service.ejecutar_paso2b_auditar_correctos(
+                    root_p,
+                    progress_cb=lambda i, t, m: self.after(0, self._update_async_status, i, t, m)
+                )
+
+            def _done(res, w_err):
+                if w_err:
+                    self.refresh_execution_history()
+                    messagebox.showerror("Error Paso 2B", f"{w_err}", parent=self)
+                    return
+                self.refresh_execution_history()
+                self._refresh_header_badge()
+                messagebox.showinfo(
+                    "Paso 2B Completado",
+                    f"Paso 2B finalizado (Lote #{res.get('ejecucion_id')}):\n"
+                    f"• Carpetas convalidadas en MySQL: {res.get('auditadas', 0)}\n"
+                    "• Estado: CONVALIDADO_CARATULA_EMBEBIDA",
+                    parent=self
+                )
+                if on_success:
+                    try:
+                        on_success()
+                    except Exception:
+                        pass
+
+            self._run_exclusive_in_thread("Paso 2B: Auditando carpetas correctas", _work, _done)
+
+        self._run_exclusive_in_thread("Analizando estructura de carpetas (Paso 2B)", lambda: self.service.planificar_paso2_estructura(root_p), _plan_done)
+
+    def run_step2c_trasladar_validadas_async(self, on_success=None):
+        """
+        Paso 2C (0 Tokens): Mueve físicamente las carpetas correctas (homogéneas) a validados_dir,
+        dejando en la raíz ÚNICAMENTE las carpetas que requieren análisis con IA.
+        """
+        root_p = self.path_var.get().strip()
+        if not root_p or not os.path.isdir(root_p):
+            messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
+            return
+
+        validados_dir = self.validados_var.get().strip()
+        if not validados_dir:
+            self.browse_validados_dir()
+            validados_dir = self.validados_var.get().strip()
+            if not validados_dir:
+                messagebox.showwarning("Falta Directorio", "Configura primero el directorio de 'Correctos'.", parent=self)
+                return
+
+        def _plan_done(plan, err):
+            if err:
+                messagebox.showerror("Paso 2C", f"No se pudo analizar la estructura: {err}", parent=self)
+                return
+
+            correctos_count = plan.get("correctos", 0)
+            if correctos_count == 0:
+                messagebox.showinfo("Paso 2C: Trasladar Validadas", "No se detectaron carpetas correctas en la raíz para trasladar.", parent=self)
+                return
+
+            sample = [i for i in plan.get("items", []) if i.get("clasificacion") == "CORRECTOS"][:8]
+            lines = [f"  • {i['carpeta']} ({i['total_pdfs']} PDFs)" for i in sample]
+            msg = (
+                "PASO 2C: TRASLADAR CARPETAS CORRECTAS A VALIDADOS\n\n"
+                f"• Carpetas correctas a mover: {correctos_count}\n"
+                f"• Destino: {validados_dir}\n"
+                "• Al moverlas, en la raíz quedarán ÚNICAMENTE las carpetas que requieren IA.\n"
+                "• 0 Tokens de IA consumidos.\n"
+                "• Registrado en MySQL con soporte de Rollback total.\n\n"
+                + ("Ejemplos:\n" + "\n".join(lines) if lines else "")
+                + "\n\n¿Deseas trasladar las carpetas ahora?"
+            )
+            if not messagebox.askyesno("Confirmar Paso 2C", msg, parent=self):
+                return
+
+            def _work():
+                return self.service.ejecutar_traslado_validados(
+                    root_p, validados_dir,
+                    progress_cb=lambda i, t, m: self.after(0, self._update_async_status, i, t, m)
+                )
+
+            def _done(res, w_err):
+                if w_err:
+                    self.reload_root_preview()
+                    self.refresh_execution_history()
+                    messagebox.showerror("Error Paso 2C", f"{w_err}\n\nSi se movieron carpetas, el lote está registrado y puede revertirse.", parent=self)
+                    return
+                self.reload_root_preview()
+                self.refresh_execution_history()
+                self._refresh_header_badge()
+                messagebox.showinfo(
+                    "Paso 2C Completado",
+                    f"Paso 2C finalizado (Lote #{res.get('ejecucion_id')}):\n"
+                    f"• Carpetas trasladadas a Validados: {res.get('movidas', 0)}\n\n"
+                    "Puedes revertir este traslado en cualquier momento desde el Historial.",
+                    parent=self
+                )
+                if on_success:
+                    try:
+                        on_success()
+                    except Exception:
+                        pass
+
+            self._run_exclusive_in_thread("Paso 2C: Trasladando validadas a destino", _work, _done)
+
+        self._run_exclusive_in_thread("Analizando estructura de carpetas (Paso 2C)", lambda: self.service.planificar_paso2_estructura(root_p), _plan_done)
 
     def _run_step3(self, mode: str, target_dir: str, label: str):
         def _work():

@@ -1,4 +1,5 @@
 import os
+import shutil
 import re
 import functools
 import threading
@@ -1573,6 +1574,263 @@ class FolderOCRService:
             "archivos_renombrados": 0,
             "errores": errors,
             "omitidas": omitted,
+        }
+
+    @exclusive_op("Paso 2A: Apartar discrepancias de estructura")
+    def ejecutar_paso2a_apartar_estructura(
+        self,
+        root_path: str,
+        apartados_dir: str,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Paso 2A Pre-IA (0 tokens):
+        Traslada físicamente todas las carpetas con estructura discrepante (PDFs que no coinciden
+        en las 7 posiciones con la carpeta o archivos irregulares REG) a la subcarpeta
+        `apartados_dir / "ESTRUCTURA_DISCREPANTE"`.
+        Cada movimiento se registra en MySQL vinculado al lote para permitir Rollback LIFO.
+        """
+        self.reload_settings()
+        plan = self.planificar_paso2_estructura(root_path)
+        apartados_items = [i for i in plan.get("items", []) if i.get("clasificacion") == "APARTADOS"]
+
+        if not apartados_items:
+            return {"ejecucion_id": None, "total": 0, "movidas": 0, "archivos_movidos": 0, "errores": []}
+
+        target_base = Path(apartados_dir) / "ESTRUCTURA_DISCREPANTE"
+        target_base.mkdir(parents=True, exist_ok=True)
+
+        ejecucion_id = self.mysql.crear_ejecucion_lote(
+            tipo_ejecucion="PASO_2A_APARTAR_ESTRUCTURA",
+            detalles={"root_path": str(root_path), "apartados_dir": str(target_base), "candidatos": len(apartados_items)},
+        )
+
+        movidas = 0
+        archivos_movidos = 0
+        errors: List[str] = []
+        total = len(apartados_items)
+
+        for idx, item in enumerate(apartados_items, start=1):
+            sf_path = Path(item["ruta"])
+            fname = sf_path.name
+            if progress_cb:
+                progress_cb(idx, total, f"Apartando ({idx}/{total}): {fname}")
+
+            if not sf_path.exists():
+                errors.append(f"{fname}: La carpeta no existe en disco.")
+                continue
+
+            dest_folder = FileOperations.resolve_directory_collision(
+                parent_dir=target_base,
+                base_folder_name=fname,
+                current_folder_path=sf_path,
+            ).resolve()
+
+            try:
+                c_uuid = self.mysql.obtener_uuid_por_ruta_o_nombre(str(sf_path.resolve()), fname)
+                n_pdfs = item.get("total_pdfs", 0)
+                old_str = str(sf_path.resolve())
+                dest_str = str(dest_folder)
+
+                shutil.move(old_str, dest_str)
+                try:
+                    self.mysql.registrar_movimiento_carpeta(
+                        ejecucion_id=ejecucion_id,
+                        carpeta_uuid=c_uuid,
+                        tipo_accion="APARTADO_ESTRUCTURA_DISCREPANTE",
+                        nombre_anterior=fname,
+                        nombre_nuevo=dest_folder.name,
+                        ruta_anterior=old_str,
+                        ruta_nueva=dest_str,
+                        cantidad_archivos=n_pdfs,
+                    )
+                except Exception as log_exc:
+                    shutil.move(dest_str, old_str)
+                    raise RuntimeError(f"Error al registrar en MySQL, movimiento deshecho: {log_exc}")
+
+                movidas += 1
+                archivos_movidos += n_pdfs
+            except Exception as exc:
+                errors.append(f"{fname}: {exc}")
+
+        self.mysql.finalizar_ejecucion_lote(
+            ejecucion_id=ejecucion_id,
+            total_carpetas=movidas,
+            total_archivos=archivos_movidos,
+            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+            detalles={"errores": errors[:20]} if errors else None,
+        )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "total": total,
+            "movidas": movidas,
+            "archivos_movidos": archivos_movidos,
+            "errores": errors,
+        }
+
+    @exclusive_op("Paso 2B: Auditar correctos")
+    def ejecutar_paso2b_auditar_correctos(
+        self,
+        root_path: str,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Paso 2B Pre-IA (0 tokens):
+        Audita en MySQL todas las carpetas homogéneas al 100% que NO tienen archivo suelto
+        de carátula (carátula embebida). Se registran como `CONVALIDADO_CARATULA_EMBEBIDA`.
+        No se mueven físicamente en este paso (el usuario puede trasladarlas manualmente luego).
+        """
+        self.reload_settings()
+        plan = self.planificar_paso2_estructura(root_path)
+        correctos_items = [i for i in plan.get("items", []) if i.get("clasificacion") == "CORRECTOS"]
+
+        if not correctos_items:
+            return {"ejecucion_id": None, "total": 0, "auditadas": 0, "errores": []}
+
+        ejecucion_id = self.mysql.crear_ejecucion_lote(
+            tipo_ejecucion="PASO_2B_AUDITAR_CORRECTOS",
+            detalles={"root_path": str(root_path), "candidatos": len(correctos_items)},
+        )
+
+        auditadas = 0
+        errors: List[str] = []
+        total = len(correctos_items)
+
+        for idx, item in enumerate(correctos_items, start=1):
+            sf_path = Path(item["ruta"])
+            fname = sf_path.name
+            if progress_cb:
+                progress_cb(idx, total, f"Auditando ({idx}/{total}): {fname}")
+
+            try:
+                c_uuid = self.mysql.obtener_uuid_por_ruta_o_nombre(str(sf_path.resolve()), fname)
+                n_pdfs = item.get("total_pdfs", 0)
+                cur_str = str(sf_path.resolve())
+
+                self.mysql.registrar_movimiento_carpeta(
+                    ejecucion_id=ejecucion_id,
+                    carpeta_uuid=c_uuid,
+                    tipo_accion="CONVALIDADO_CARATULA_EMBEBIDA",
+                    nombre_anterior=fname,
+                    nombre_nuevo=fname,
+                    ruta_anterior=cur_str,
+                    ruta_nueva=cur_str,
+                    cantidad_archivos=n_pdfs,
+                )
+                auditadas += 1
+            except Exception as exc:
+                errors.append(f"{fname}: {exc}")
+
+        self.mysql.finalizar_ejecucion_lote(
+            ejecucion_id=ejecucion_id,
+            total_carpetas=auditadas,
+            total_archivos=0,
+            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+            detalles={"errores": errors[:20]} if errors else None,
+        )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "total": total,
+            "auditadas": auditadas,
+            "errores": errors,
+        }
+
+    @exclusive_op("Traslado a Validados")
+    def ejecutar_traslado_validados(
+        self,
+        root_path: str,
+        validados_dir: str,
+        folder_names: Optional[List[str]] = None,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Traslada físicamente carpetas validadas/correctas desde la raíz al `validados_dir`.
+        Si `folder_names` es None, traslada automáticamente las carpetas clasificadas como CORRECTOS.
+        Cada movimiento se registra en MySQL con soporte de Rollback LIFO.
+        """
+        self.reload_settings()
+        target_base = Path(validados_dir)
+        target_base.mkdir(parents=True, exist_ok=True)
+
+        if folder_names is None:
+            plan = self.planificar_paso2_estructura(root_path)
+            candidatos = [Path(i["ruta"]) for i in plan.get("items", []) if i.get("clasificacion") == "CORRECTOS"]
+        else:
+            root_p = Path(root_path)
+            candidatos = [root_p / fn for fn in folder_names if (root_p / fn).is_dir()]
+
+        if not candidatos:
+            return {"ejecucion_id": None, "total": 0, "movidas": 0, "archivos_movidos": 0, "errores": []}
+
+        ejecucion_id = self.mysql.crear_ejecucion_lote(
+            tipo_ejecucion="TRASLADO_VALIDADOS_CORRECTOS",
+            detalles={"root_path": str(root_path), "validados_dir": str(validados_dir), "candidatos": len(candidatos)},
+        )
+
+        movidas = 0
+        archivos_movidos = 0
+        errors: List[str] = []
+        total = len(candidatos)
+
+        for idx, sf_path in enumerate(candidatos, start=1):
+            fname = sf_path.name
+            if progress_cb:
+                progress_cb(idx, total, f"Moviendo a Validados ({idx}/{total}): {fname}")
+
+            if not sf_path.exists():
+                errors.append(f"{fname}: La carpeta no existe.")
+                continue
+
+            dest_folder = FileOperations.resolve_directory_collision(
+                parent_dir=target_base,
+                base_folder_name=fname,
+                current_folder_path=sf_path,
+            ).resolve()
+
+            try:
+                c_uuid = self.mysql.obtener_uuid_por_ruta_o_nombre(str(sf_path.resolve()), fname)
+                pdfs = [f for f in sf_path.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"]
+                n_pdfs = len(pdfs)
+                old_str = str(sf_path.resolve())
+                dest_str = str(dest_folder)
+
+                shutil.move(old_str, dest_str)
+                try:
+                    self.mysql.registrar_movimiento_carpeta(
+                        ejecucion_id=ejecucion_id,
+                        carpeta_uuid=c_uuid,
+                        tipo_accion="TRASLADO_VALIDADOS",
+                        nombre_anterior=fname,
+                        nombre_nuevo=dest_folder.name,
+                        ruta_anterior=old_str,
+                        ruta_nueva=dest_str,
+                        cantidad_archivos=n_pdfs,
+                    )
+                except Exception as log_exc:
+                    shutil.move(dest_str, old_str)
+                    raise RuntimeError(f"Error al registrar en MySQL, traslado deshecho: {log_exc}")
+
+                movidas += 1
+                archivos_movidos += n_pdfs
+            except Exception as exc:
+                errors.append(f"{fname}: {exc}")
+
+        self.mysql.finalizar_ejecucion_lote(
+            ejecucion_id=ejecucion_id,
+            total_carpetas=movidas,
+            total_archivos=archivos_movidos,
+            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+            detalles={"errores": errors[:20]} if errors else None,
+        )
+
+        return {
+            "ejecucion_id": ejecucion_id,
+            "total": total,
+            "movidas": movidas,
+            "archivos_movidos": archivos_movidos,
+            "errores": errors,
         }
 
     @exclusive_op("Paso 3: Traslado por lote")
