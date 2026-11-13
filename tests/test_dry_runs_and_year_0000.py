@@ -79,6 +79,33 @@ class TestDryRunsAndYear0000(unittest.TestCase):
         self.assertTrue(f.exists())
         self.assertFalse((self.root / "01_01_03_00_00_00_0000").exists())
 
+    def test_legacy_folder_starting_with_year_does_not_destroy_delegacion_01(self):
+        """
+        Verifica que carpetas con formato antiguo que empiezan por el año (ej. 1982_03_01_00_00_00_0001-0009
+        o 0000_01_00_00_00_00_00) NO destruyan la delegación 01 ni pongan el año en ambos extremos.
+        """
+        f1 = self.root / "1982_03_01_00_00_00_0001-0009"
+        f1.mkdir()
+        _dummy_pdf(f1 / "01_03_01_00_00_00_1982_0001_00.pdf")
+        _dummy_pdf(f1 / "01_03_01_00_00_00_1982_0002_00.pdf")
+
+        f2 = self.root / "0000_01_00_00_00_00_00"
+        f2.mkdir()
+        _dummy_pdf(f2 / "01_00_00_00_00_00_0000_0001_00_DUP1.pdf")
+        _dummy_pdf(f2 / "01_00_00_00_00_00_0000_0021_00.pdf")
+
+        svc = FolderOCRService()
+        plan = svc.planificar_paso1(str(self.root))
+        by_name = {i["carpeta"]: i["nuevo"] for i in plan["items"]}
+
+        # f1 DEBE empezar por 01_ y terminar en _1982 (NO 1982_..._1982)
+        self.assertEqual(by_name[f1.name], "01_03_01_00_00_00_1982")
+        self.assertFalse(by_name[f1.name].startswith("1982"))
+
+        # f2 DEBE empezar por 01_ y terminar en _0000 (NO 0000_..._0000)
+        self.assertEqual(by_name[f2.name], "01_00_00_00_00_00_0000")
+        self.assertFalse(by_name[f2.name].startswith("0000"))
+
     def test_planificar_paso2_clasifica_sin_tokens(self):
         """
         Prueba la clasificación pre-IA (0 tokens):

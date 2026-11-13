@@ -15,6 +15,7 @@ from src.core.cache_manager import CacheManager
 from src.core.claude_engine import ClaudeVisionEngine
 from src.core.caratula_inspector import CaratulaInspector
 from src.core.file_operations import FileOperations
+from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
 from src.parsers.folder_parser import FolderParser
 from src.matcher.comparator import FolderComparator
 from src.database.mysql_manager import MySQLManager
@@ -1361,11 +1362,12 @@ class FolderOCRService:
         REGLA DEL PASO 1 (única fuente de verdad, usada por la vista previa y por la ejecución):
         1. Se toma el PRIMER PDF en orden alfabético que no sea carátula (_CARATULA) ni irregular (REG).
            Si no hay ninguno, se usa el primer PDF de la carpeta.
-        2. Del nombre de ese PDF se leen sección, libro, tomo, volumen, fraccionamiento y año.
-           La Delegación (posición 1) se conserva SIEMPRE de la carpeta.
-        3. Si ese PDF no tiene año legible -> la carpeta se OMITE (no se toca).
-        4. El nombre nuevo es: Deleg_Secc_Libro_Tomo_Vol_Frac_Año (campos vacíos = 00, año vacío = 0000).
-        5. Si ya existe otra carpeta con ese nombre se agrega _2, _3...
+        2. El nombre propuesto para la carpeta se toma DIRECTAMENTE del nombre del primer PDF hasta el año:
+           - La Delegación (ej. '01') se toma DIRECTAMENTE del primer PDF (nunca de la carpeta, evitando destruir 01).
+           - El año (ej. '1982' o '0000') se conserva tal cual al final (evitando el año en ambos extremos).
+           - Quita sufijos de duplicado (_DUP, _DUP1).
+        3. Si ese PDF no tiene año detectable -> la carpeta se OMITE (no se toca).
+        4. Si ya existe otra carpeta con ese nombre se agrega _2, _3...
         Solo se renombra la CARPETA. Los PDFs internos NO se tocan.
         Retorna (nombre_destino | None, motivo, nombre_del_pdf_base).
         """
@@ -1381,31 +1383,12 @@ class FolderOCRService:
             and not CaratulaInspector.is_irregular_reg_pdf_name(p.name)
         ]
         first_pdf = regulars[0] if regulars else pdfs[0]
-        stem = Path(first_pdf.name).stem
-        clean_stem = re.sub(r"[_+-]DUP\d*.*$", "", stem, flags=re.IGNORECASE)
-        p_data = FolderParser.parse(clean_stem)
-        toks = clean_stem.split("_")
 
-        anio_val = p_data.get("anio_raw")
-        if not anio_val:
-            if len(toks) >= 7:
-                # Tomar la posición de año (índice 6) sin importar si es 0000 o 4 dígitos
-                anio_val = toks[6]
-            else:
-                return None, f"El 1er PDF '{first_pdf.name}' no tiene suficientes segmentos hasta el año: no se toca", first_pdf.name
+        code, detail = FolderRenamerByFirstPdf.get_first_pdf_code_up_to_year(first_pdf.name, sf.name)
+        if not code:
+            return None, detail or f"El 1er PDF '{first_pdf.name}' no tiene posición de año válida: no se toca", first_pdf.name
 
-        f_data = FolderParser.parse(sf.name)
-        delegacion = str(f_data.get("delegacion") or p_data.get("delegacion") or (toks[0] if toks else "01"))
-        clean_code = FileOperations.build_clean_folder_code(
-            delegacion=delegacion,
-            seccion=p_data.get("seccion_raw") or (toks[1] if len(toks) > 1 else "00"),
-            libro=p_data.get("libro_raw") or (toks[2] if len(toks) > 2 else "00"),
-            tomo=p_data.get("tomo_raw") or (toks[3] if len(toks) > 3 else "00"),
-            volumen=p_data.get("volumen_raw") or (toks[4] if len(toks) > 4 else "00"),
-            fraccionamiento=p_data.get("fraccionamiento_raw") or (toks[5] if len(toks) > 5 else "00"),
-            anio=anio_val or "0000",
-        )
-        return clean_code, "OK", first_pdf.name
+        return code, detail or "OK", first_pdf.name
 
     def planificar_paso1(self, root_path: str) -> Dict[str, Any]:
         """Vista previa (SOLO LECTURA) de lo que haría el Paso 1, simulando colisiones _2/_3."""

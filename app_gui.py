@@ -1695,9 +1695,9 @@ class DryRunPaso1Dialog(tk.Toplevel):
         tk.Label(
             rule_banner,
             text=(
-                "💡 REGLA DEL PASO 1 (Solo Carpetas, 0 Tokens): Se toma el 1er PDF regular hasta el año. "
-                "Si el PDF tiene año '0000', se conserva tal cual '0000'. Colisiones se resuelven con _2, _3... "
-                "Los PDFs internos NO se tocan."
+                "💡 REGLA DEL PASO 1 (Solo Carpetas, 0 Tokens): El nombre se toma directamente del 1er PDF regular hasta el año. "
+                "La delegación '01' se lee del propio PDF (no de la carpeta). Si el PDF tiene año '0000', se conserva '0000'. "
+                "Colisiones se resuelven con _2, _3... Los PDFs internos NO se tocan."
             ),
             font=("Segoe UI", 9, "bold"),
             bg="#eff6ff",
@@ -3278,10 +3278,10 @@ class OCRLibrosApp(tk.Tk):
             omit = [i for i in plan["items"] if i["accion"] == "OMITIR"][:5]
             msg = (
                 "REGLA DEL PASO 1\n"
-                "• Se toma el 1er PDF (orden alfabético) que no sea carátula ni REG.\n"
-                "• Nombre nuevo = Deleg_Secc_Libro_Tomo_Vol_Frac_Año leído de ese PDF (Delegación se conserva).\n"
-                "• Si ya existe ese nombre se agrega _2, _3...  • Si el PDF no tiene año, la carpeta NO se toca.\n"
-                "• Solo se renombran CARPETAS; los PDFs no se modifican. Todo queda en un lote con rollback.\n\n"
+                "• Se toma el 1er PDF regular (orden alfabético) hasta la posición del año.\n"
+                "• Delegación (posición 1): se lee directamente del 1er PDF (conservando '01').\n"
+                "• Año: se toma del 1er PDF (si tiene '0000', se conserva '0000' tal cual).\n"
+                "• Si ya existe ese nombre se agrega _2, _3... • Solo se renombran CARPETAS; PDFs quedan intactos.\n\n"
                 f"Carpetas: {plan['total']}  |  A renombrar: {plan['renombrar']}  |  Ya correctas: {plan['sin_cambio']}  "
                 f"|  Omitidas: {plan['omitir']}  |  Con sufijo _N por colisión: {plan['colisiones']}\n\n"
                 + ("Ejemplos:\n" + "\n".join(lines) if lines else "No hay carpetas por renombrar.")
