@@ -3524,6 +3524,8 @@ class OCRLibrosApp(tk.Tk):
 
         threading.Thread(target=_runner, daemon=True).start()
 
+    run_exclusive_async = _run_exclusive_in_thread
+
     def _finish_exclusive(self, on_done, res, err):
         if getattr(self, "_current_progress_modal", None):
             try:
@@ -4932,7 +4934,7 @@ class OCRLibrosApp(tk.Tk):
 
             messagebox.showinfo("Reubicación de Carpetas", "\n".join(msg_lines), parent=self)
 
-        self.run_exclusive_async(f"Reubicando {len(folder_paths)} carpeta(s)", _work, _on_done)
+        self._run_exclusive_in_thread(f"Reubicando {len(folder_paths)} carpeta(s)", _work, _on_done)
 
     def _on_folder_selected(self, event=None, source_tree: Optional[ttk.Treeview] = None):
         if source_tree is not None:
