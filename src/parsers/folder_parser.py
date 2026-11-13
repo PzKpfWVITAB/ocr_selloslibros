@@ -21,15 +21,26 @@ class FolderParser:
 
     @staticmethod
     def parse(folder_input: Any) -> Dict[str, Any]:
-        folder_name = Path(folder_input).name if isinstance(folder_input, (str, Path)) else str(folder_input)
+        raw_name = Path(folder_input).name if isinstance(folder_input, (str, Path)) else str(folder_input)
+        if raw_name.lower().endswith(".pdf"):
+            folder_name = raw_name[:-4]
+        else:
+            folder_name = raw_name
         parts: List[str] = folder_name.split("_")
 
         year_pattern = re.compile(r"^(19\d{2}|20\d{2}|0000)$")
         year_idx: Optional[int] = None
 
-        # Buscar el año de 4 dígitos (empezando desde la posición 6 en adelante)
+        # Buscar el año de 4 dígitos o 0000 (empezando desde la posición 6 en adelante)
         if len(parts) >= 7:
             for idx in range(6, len(parts)):
+                if year_pattern.match(parts[idx]):
+                    year_idx = idx
+                    break
+
+        # Si no se encontró en >= 6, buscar entre 3 y 6 por si el formato es compacto
+        if year_idx is None and len(parts) >= 4:
+            for idx in range(3, min(6, len(parts))):
                 if year_pattern.match(parts[idx]):
                     year_idx = idx
                     break

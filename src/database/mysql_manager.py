@@ -233,6 +233,9 @@ class MySQLManager:
                 # Cargar existentes para no duplicar si se vuelve a correr
                 cur.execute("SELECT `uuid`, `nombre_original`, `ruta_original` FROM `carpetas_iniciales`")
                 existentes_por_ruta = {row["ruta_original"]: row["uuid"] for row in cur.fetchall()}
+                # Rutas ACTUALES (tras renombres/movimientos no revertidos) -> misma carpeta, no es nueva
+                for u, ruta_actual in self._posiciones_actuales(cur).items():
+                    existentes_por_ruta.setdefault(ruta_actual, u)
 
                 for item in carpetas_info:
                     ruta_orig = str(item["ruta_original"])
@@ -389,31 +392,53 @@ class MySQLManager:
         finally:
             conn.close()
 
+    ESTADOS_REVERTIBLES = ("COMPLETADO", "COMPLETADO_CON_ERRORES", "EN_PROCESO", "REVERSION_PARCIAL")
+
     def obtener_ultima_ejecucion_revertible(self) -> Optional[Dict[str, Any]]:
         """
-        Retorna la ejecución más reciente en estado 'COMPLETADO' que realizó cambios en disco
-        (excluyendo puramente INDEXACION_INICIAL que no mueve archivos).
+        Retorna el lote MÁS RECIENTE que todavía no fue revertido por completo
+        (COMPLETADO, COMPLETADO_CON_ERRORES, EN_PROCESO huérfano o REVERSION_PARCIAL).
+        Estricto orden cronológico inverso: nunca se salta un lote más nuevo.
+        Se excluye INDEXACION_INICIAL porque no mueve nada en disco.
         """
         conn = self.get_connection(include_db=True)
         try:
             with conn.cursor() as cur:
-                cur.execute("""
+                marks = ",".join(["%s"] * len(self.ESTADOS_REVERTIBLES))
+                cur.execute(f"""
                     SELECT * FROM `ejecuciones_lotes`
-                    WHERE `estado` = 'COMPLETADO'
+                    WHERE `estado` IN ({marks})
                       AND `tipo_ejecucion` != 'INDEXACION_INICIAL'
                     ORDER BY `id` DESC LIMIT 1
-                """)
+                """, self.ESTADOS_REVERTIBLES)
                 return cur.fetchone()
         finally:
             conn.close()
 
+    def _posiciones_actuales(self, cur) -> Dict[str, str]:
+        """uuid -> ruta actual esperada, según el último movimiento NO revertido."""
+        cur.execute("""
+            SELECT m.`carpeta_uuid`, m.`ruta_nueva`
+            FROM `auditoria_movimientos_carpetas` m
+            JOIN `ejecuciones_lotes` e ON e.`id` = m.`ejecucion_id`
+            WHERE e.`estado` <> 'REVERTIDO'
+            ORDER BY m.`id` ASC
+        """)
+        pos: Dict[str, str] = {}
+        for row in cur.fetchall():
+            pos[row["carpeta_uuid"]] = row["ruta_nueva"]
+        return pos
+
+    @staticmethod
+    def _temp_name(path: Path) -> Path:
+        return path.parent / f".__rb_{uuid.uuid4().hex[:10]}{path.suffix if path.is_file() else ''}"
+
     def revertir_ultima_ejecucion(self) -> Dict[str, Any]:
         """
-        Rollback estricto por ejecución en orden cronológico inverso:
-        1. Localiza la última ejecución 'COMPLETADO' con modificaciones físicas.
-        2. Revierte los movimientos de carpetas (ruta_nueva -> ruta_anterior) en orden inverso.
-        3. Revierte los movimientos/renombres de archivos PDF en orden inverso.
-        4. Marca la ejecución como 'REVERTIDO'.
+        Rollback estricto del último lote pendiente, en DOS FASES para evitar choques de nombres
+        (ej. A->X y B->X_2: se sacan todos a un nombre temporal y luego se colocan en su origen).
+        Es idempotente: lo que ya esté en su lugar original se omite.
+        Si algo falla, el lote queda como REVERSION_PARCIAL (sigue siendo el siguiente a revertir).
         """
         lote = self.obtener_ultima_ejecucion_revertible()
         if not lote:
@@ -434,86 +459,155 @@ class MySQLManager:
 
         try:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT * FROM `auditoria_movimientos_carpetas`
-                    WHERE `ejecucion_id` = %s ORDER BY `id` DESC
-                """, (ejecucion_id,))
+                cur.execute("SELECT * FROM `auditoria_movimientos_carpetas` WHERE `ejecucion_id` = %s ORDER BY `id` DESC", (ejecucion_id,))
                 mov_carpetas = list(cur.fetchall())
-
-                cur.execute("""
-                    SELECT * FROM `auditoria_movimientos_archivos`
-                    WHERE `ejecucion_id` = %s ORDER BY `id` DESC
-                """, (ejecucion_id,))
+                cur.execute("SELECT * FROM `auditoria_movimientos_archivos` WHERE `ejecucion_id` = %s ORDER BY `id` DESC", (ejecucion_id,))
                 mov_archivos = list(cur.fetchall())
 
-                # Mapa para ubicar carpetas revertidas por si los archivos aún están dentro de ruta_nueva o ruta_anterior
-                ruta_carpeta_por_uuid: Dict[str, str] = {}
+                reverted_dir: Dict[str, str] = {}
 
-                # 1. Revertir carpetas (ruta_nueva -> ruta_anterior)
+                # ---- FASE 1 (carpetas): sacar todas a nombre temporal ----
+                pending: List[Tuple[Path, Path, Path, str]] = []
                 for mc in mov_carpetas:
-                    r_nueva = Path(mc["ruta_nueva"])
-                    r_ant = Path(mc["ruta_anterior"])
-                    c_uuid = mc["carpeta_uuid"]
+                    r_nueva, r_ant, c_uuid = Path(mc["ruta_nueva"]), Path(mc["ruta_anterior"]), mc["carpeta_uuid"]
+                    if str(r_nueva) == str(r_ant):
+                        continue
+                    if r_nueva.exists():
+                        temp = self._temp_name(r_nueva)
+                        try:
+                            shutil.move(str(r_nueva), str(temp))
+                            pending.append((temp, r_ant, r_nueva, c_uuid))
+                        except Exception as exc:
+                            errors.append(f"No se pudo mover '{r_nueva.name}': {exc}")
+                    elif r_ant.exists():
+                        reverted_dir[c_uuid] = str(r_ant)  # ya estaba revertida
+                    else:
+                        errors.append(f"Carpeta no encontrada en disco (ni en origen ni en destino): {r_nueva}")
 
+                # ---- FASE 2 (carpetas): colocar en su origen ----
+                for temp, r_ant, r_nueva, c_uuid in pending:
                     try:
-                        if r_nueva.exists() and str(r_nueva) != str(r_ant):
+                        if r_ant.exists():
+                            shutil.move(str(temp), str(r_nueva))
+                            errors.append(f"Conflicto real: ya existe '{r_ant}'. La carpeta se dejó en '{r_nueva}'.")
+                        else:
                             r_ant.parent.mkdir(parents=True, exist_ok=True)
-                            if r_ant.exists():
-                                errors.append(f"Destino de rollback ya existe: {r_ant}")
-                            else:
-                                shutil.move(str(r_nueva), str(r_ant))
-                                folders_reverted += 1
-                                ruta_carpeta_por_uuid[c_uuid] = str(r_ant)
-                        elif r_ant.exists():
-                            ruta_carpeta_por_uuid[c_uuid] = str(r_ant)
+                            shutil.move(str(temp), str(r_ant))
+                            folders_reverted += 1
+                            reverted_dir[c_uuid] = str(r_ant)
                     except Exception as exc:
-                        errors.append(f"Error al revertir carpeta {r_nueva.name}: {exc}")
+                        errors.append(f"Error colocando '{r_ant.name}' (quedó como {temp}): {exc}")
 
-                # 2. Revertir nombres/rutas de archivos PDF (nombre_nuevo -> nombre_anterior)
+                # ---- FASE 1 (archivos) ----
+                f_pending: List[Tuple[Path, Path, Path]] = []
                 for ma in mov_archivos:
-                    r_nueva = Path(ma["ruta_nueva"])
-                    r_ant = Path(ma["ruta_anterior"])
                     c_uuid = ma["carpeta_uuid"]
+                    if c_uuid in reverted_dir:
+                        base_dir = Path(reverted_dir[c_uuid])
+                        current = base_dir / ma["nombre_nuevo"]
+                        target = base_dir / ma["nombre_anterior"]
+                    else:
+                        current = Path(ma["ruta_nueva"])
+                        target = Path(ma["ruta_anterior"])
+                    if str(current) == str(target):
+                        continue
+                    if current.exists():
+                        if not target.parent.exists():
+                            errors.append(f"Carpeta destino inexistente para archivo {ma['nombre_nuevo']}: {target.parent}")
+                            continue
+                        temp = self._temp_name(current)
+                        try:
+                            os.replace(str(current), str(temp))
+                            f_pending.append((temp, target, current))
+                        except Exception as exc:
+                            errors.append(f"No se pudo mover archivo {current.name}: {exc}")
+                    elif not target.exists():
+                        errors.append(f"Archivo no encontrado: {current}")
 
+                # ---- FASE 2 (archivos) ----
+                for temp, target, current in f_pending:
                     try:
-                        # Si la carpeta fue revertida arriba, buscar el archivo dentro de la carpeta revertida
-                        current_file_p = r_nueva
-                        target_file_p = r_ant
-
-                        if not current_file_p.exists() and c_uuid in ruta_carpeta_por_uuid:
-                            reverted_dir = Path(ruta_carpeta_por_uuid[c_uuid])
-                            candidate = reverted_dir / ma["nombre_nuevo"]
-                            if candidate.exists():
-                                current_file_p = candidate
-                                target_file_p = reverted_dir / ma["nombre_anterior"]
-
-                        if current_file_p.exists() and str(current_file_p) != str(target_file_p):
-                            if not target_file_p.exists():
-                                os.rename(str(current_file_p), str(target_file_p))
-                                files_reverted += 1
-                            else:
-                                errors.append(f"Archivo destino ya existe al revertir: {target_file_p.name}")
+                        if target.exists():
+                            os.replace(str(temp), str(current))
+                            errors.append(f"Conflicto real de archivo: ya existe {target.name}")
+                        else:
+                            os.replace(str(temp), str(target))
+                            files_reverted += 1
                     except Exception as exc:
-                        errors.append(f"Error al revertir archivo {ma['nombre_nuevo']}: {exc}")
+                        errors.append(f"Error colocando archivo {target.name} (quedó como {temp}): {exc}")
 
-                # 3. Marcar ejecución como REVERTIDO
-                cur.execute("""
-                    UPDATE `ejecuciones_lotes`
-                    SET `estado` = 'REVERTIDO'
-                    WHERE `id` = %s
-                """, (ejecucion_id,))
+                nuevo_estado = "REVERTIDO" if not errors else "REVERSION_PARCIAL"
+                cur.execute("UPDATE `ejecuciones_lotes` SET `estado` = %s WHERE `id` = %s", (nuevo_estado, ejecucion_id))
 
             return {
-                "success": True,
+                "success": not errors,
                 "ejecucion_id": ejecucion_id,
                 "tipo_ejecucion": tipo_ejecucion,
                 "folders_reverted": folders_reverted,
                 "files_reverted": files_reverted,
                 "errors": errors,
-                "message": f"Ejecución #{ejecucion_id} ({tipo_ejecucion}) revertida exitosamente."
+                "message": (
+                    f"Ejecución #{ejecucion_id} ({tipo_ejecucion}) revertida exitosamente."
+                    if not errors else
+                    f"Ejecución #{ejecucion_id} ({tipo_ejecucion}) revertida PARCIALMENTE ({len(errors)} problema(s))."
+                ),
             }
         finally:
             conn.close()
+
+    def verificar_invariante(self, scan_dirs: Optional[List[Tuple[str, int]]] = None) -> Dict[str, Any]:
+        """
+        Compara la BD contra el disco REAL:
+        - Para cada carpeta indexada calcula dónde DEBERÍA estar (último movimiento no revertido, o su ruta original)
+          y verifica que exista.
+        - Escanea `scan_dirs` [(ruta, profundidad)] y reporta carpetas con '_' que la BD no conoce.
+        """
+        conn = self.get_connection(include_db=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT `uuid`, `nombre_original`, `ruta_original` FROM `carpetas_iniciales`")
+                iniciales = list(cur.fetchall())
+                pos = self._posiciones_actuales(cur)
+        finally:
+            conn.close()
+
+        esperadas: Dict[str, str] = {}
+        faltantes: List[str] = []
+        for it in iniciales:
+            ruta = pos.get(it["uuid"], it["ruta_original"])
+            esperadas[os.path.normcase(str(Path(ruta)))] = it["nombre_original"]
+            if not Path(ruta).is_dir():
+                faltantes.append(f"{it['nombre_original']} -> esperada en {ruta}")
+
+        desconocidas: List[str] = []
+        fisicas = 0
+        for base, depth in (scan_dirs or []):
+            bp = Path(base)
+            if not bp.is_dir():
+                continue
+            level = [bp]
+            for _ in range(max(1, depth)):
+                nxt: List[Path] = []
+                for d in level:
+                    try:
+                        nxt.extend([c for c in d.iterdir() if c.is_dir()])
+                    except Exception:
+                        pass
+                level = nxt
+            for c in level:
+                if "_" not in c.name:
+                    continue
+                fisicas += 1
+                if os.path.normcase(str(c.resolve())) not in esperadas and os.path.normcase(str(c)) not in esperadas:
+                    desconocidas.append(str(c))
+
+        return {
+            "total_indexadas": len(iniciales),
+            "fisicas_escaneadas": fisicas,
+            "faltantes": faltantes,
+            "desconocidas": desconocidas,
+            "congruente": not faltantes and not desconocidas and (fisicas == len(iniciales) if scan_dirs else True),
+        }
 
     def get_executive_statistics(self) -> Dict[str, Any]:
         """Estadísticas en tiempo real desde las 5 tablas de MySQL."""

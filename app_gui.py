@@ -1650,230 +1650,464 @@ class MySQLSettingsDialog(tk.Toplevel):
         self.destroy()
 
 
-class FolderRenamerDialog(tk.Toplevel):
-    """Ventana para renombrar carpetas según el primer PDF hasta el año (regla 0000 y colisión _2)."""
-
+class DryRunPaso1Dialog(tk.Toplevel):
+    """
+    Simulación / Dry-Run del Paso 1:
+    - 100% solo lectura (0 escrituras en disco, 0 tokens de IA).
+    - Simula el renombrado por 1er PDF hasta el año (conserva '0000' tal cual; agrega _2 si hay colisión).
+    - Permite buscar y filtrar (todos / a renombrar / ya correctas / omitidas / colisiones).
+    - Incluye botón para aplicar el Paso 1 directamente con registro en lote MySQL y Rollback 100% atómico.
+    """
     def __init__(self, parent: "OCRLibrosApp", initial_path: str = ""):
         super().__init__(parent)
         self.parent_app = parent
-        self.title("📁 Renombrar Carpetas por Primer PDF (con Regla 0000 y Colisiones _2)")
-        self.geometry("1060x650")
-        self.minsize(880, 500)
+        self.title("🧪 Dry-Run Paso 1: Simulación de Renombrado por 1er PDF (0 Escrituras en Disco)")
+        self.geometry("1100x680")
+        self.minsize(900, 520)
         self.transient(parent)
         self.grab_set()
 
-        self.renamer = FolderRenamerByFirstPdf(self.parent_app.mysql_manager)
-        self.preview_data: List[Dict[str, Any]] = []
+        self.plan_result: Dict[str, Any] = {}
+        self.all_items: List[Dict[str, Any]] = []
         self._build_ui(initial_path)
+        if self.path_var.get().strip():
+            self._scan_preview()
 
     def _build_ui(self, initial_path: str):
         container = ttk.Frame(self, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
 
-        top_frame = ttk.LabelFrame(container, text=" Carpeta Contenedora de Libros ", padding=8)
-        top_frame.pack(fill=tk.X, pady=(0, 8))
+        # 1. Selector de Ruta
+        top_frame = ttk.LabelFrame(container, text=" Carpeta Raíz para Simulación del Paso 1 ", padding=8)
+        top_frame.pack(fill=tk.X, pady=(0, 6))
 
         row1 = ttk.Frame(top_frame)
         row1.pack(fill=tk.X)
-
         self.path_var = tk.StringVar(value=initial_path or self.parent_app.path_var.get())
-        ttk.Label(row1, text="Ruta:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(row1, text="Ruta Raíz:").pack(side=tk.LEFT, padx=(0, 6))
         ttk.Entry(row1, textvariable=self.path_var, font=("Consolas", 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         ttk.Button(row1, text="Examinar...", command=self._browse_dir).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(row1, text="🔍 Escanear / Vista Previa", style="Primary.TButton", command=self._scan_preview).pack(side=tk.LEFT)
+        ttk.Button(row1, text="🔍 Simular Ahora (Dry-Run)", style="Primary.TButton", command=self._scan_preview).pack(side=tk.LEFT)
 
-        # Resumen / Progreso
-        summary_frame = ttk.Frame(container)
-        summary_frame.pack(fill=tk.X, pady=(0, 6))
+        # 2. Banner de Regla
+        rule_banner = tk.Frame(container, bg="#eff6ff", padx=8, pady=6, relief=tk.SOLID, bd=1)
+        rule_banner.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(
+            rule_banner,
+            text=(
+                "💡 REGLA DEL PASO 1 (Solo Carpetas, 0 Tokens): Se toma el 1er PDF regular hasta el año. "
+                "Si el PDF tiene año '0000', se conserva tal cual '0000'. Colisiones se resuelven con _2, _3... "
+                "Los PDFs internos NO se tocan."
+            ),
+            font=("Segoe UI", 9, "bold"),
+            bg="#eff6ff",
+            fg="#1e40af",
+            justify=tk.LEFT,
+            wraplength=1040
+        ).pack(anchor=tk.W)
 
-        self.lbl_summary = ttk.Label(summary_frame, text="Haz clic en '🔍 Escanear / Vista Previa' para analizar las carpetas.", font=("Segoe UI", 9, "bold"))
-        self.lbl_summary.pack(side=tk.LEFT)
+        # 3. Badges de Métricas
+        metrics_frame = ttk.Frame(container)
+        metrics_frame.pack(fill=tk.X, pady=(0, 6))
 
-        self.mysql_active_var = tk.BooleanVar(value=self.parent_app.mysql_manager.enabled)
-        chk_my = ttk.Checkbutton(summary_frame, text="Registrar movimientos en MySQL", variable=self.mysql_active_var)
-        chk_my.pack(side=tk.RIGHT)
+        self.lbl_total = tk.Label(metrics_frame, text="Total: 0", font=("Segoe UI", 9, "bold"), bg="#f1f5f9", fg="#334155", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_total.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Tabla de Vista Previa
+        self.lbl_renombrar = tk.Label(metrics_frame, text="✏ Por Renombrar: 0", font=("Segoe UI", 9, "bold"), bg="#eff6ff", fg="#1d4ed8", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_renombrar.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_correctas = tk.Label(metrics_frame, text="✔ Ya Correctas: 0", font=("Segoe UI", 9, "bold"), bg="#f0fdf4", fg="#15803d", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_correctas.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_omitir = tk.Label(metrics_frame, text="⚠ Omitidas: 0", font=("Segoe UI", 9, "bold"), bg="#fef2f2", fg="#b91c1c", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_omitir.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_colisiones = tk.Label(metrics_frame, text="⚡ Colisiones (_N): 0", font=("Segoe UI", 9, "bold"), bg="#fffbeb", fg="#b45309", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_colisiones.pack(side=tk.LEFT)
+
+        # 4. Filtro y Búsqueda
+        filter_frame = ttk.Frame(container)
+        filter_frame.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT, padx=(0, 6))
+        self.filter_var = tk.StringVar(value="TODOS")
+        cb_filter = ttk.Combobox(
+            filter_frame,
+            textvariable=self.filter_var,
+            values=["TODOS", "SOLO_RENOMBRAR", "SOLO_CORRECTAS", "SOLO_OMITIDAS", "SOLO_COLISIONES"],
+            state="readonly",
+            width=20
+        )
+        cb_filter.pack(side=tk.LEFT, padx=(0, 14))
+        cb_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
+
+        ttk.Label(filter_frame, text="Buscar:").pack(side=tk.LEFT, padx=(0, 6))
+        self.search_var = tk.StringVar()
+        ent_search = ttk.Entry(filter_frame, textvariable=self.search_var, width=28)
+        ent_search.pack(side=tk.LEFT)
+        ent_search.bind("<KeyRelease>", lambda e: self._apply_filter())
+
+        # 5. Tabla de Vista Previa (Treeview)
         tree_frame = ttk.Frame(container)
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        cols = ("num", "orig_name", "first_pdf", "sugg_name", "col", "status", "detail")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended")
+        cols = ("num", "orig_name", "first_pdf", "sugg_name", "action", "motivo")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
         self.tree.heading("num", text="#")
         self.tree.heading("orig_name", text="Carpeta Original")
-        self.tree.heading("first_pdf", text="Primer Archivo PDF")
-        self.tree.heading("sugg_name", text="Nombre Sugerido (hasta Año)")
-        self.tree.heading("col", text="Colisión")
-        self.tree.heading("status", text="Estado")
-        self.tree.heading("detail", text="Detalle / Regla Aplicada")
+        self.tree.heading("first_pdf", text="1er PDF Base")
+        self.tree.heading("sugg_name", text="Nombre Destino (Paso 1)")
+        self.tree.heading("action", text="Acción")
+        self.tree.heading("motivo", text="Motivo / Detalle")
 
-        self.tree.column("num", width=40, anchor=tk.CENTER, stretch=False)
-        self.tree.column("orig_name", width=220, anchor=tk.W)
+        self.tree.column("num", width=45, anchor=tk.CENTER, stretch=False)
+        self.tree.column("orig_name", width=240, anchor=tk.W)
         self.tree.column("first_pdf", width=250, anchor=tk.W)
-        self.tree.column("sugg_name", width=220, anchor=tk.W)
-        self.tree.column("col", width=65, anchor=tk.CENTER, stretch=False)
-        self.tree.column("status", width=120, anchor=tk.CENTER)
-        self.tree.column("detail", width=200, anchor=tk.W)
+        self.tree.column("sugg_name", width=240, anchor=tk.W)
+        self.tree.column("action", width=120, anchor=tk.CENTER, stretch=False)
+        self.tree.column("motivo", width=220, anchor=tk.W)
 
-        self.tree.tag_configure("needs_rename", background="#fffbeb", foreground="#b45309")
-        self.tree.tag_configure("match", background="#f0fdf4", foreground="#15803d")
-        self.tree.tag_configure("applied", background="#ecfdf5", foreground="#047857")
-        self.tree.tag_configure("error", background="#fef2f2", foreground="#b91c1c")
+        self.tree.tag_configure("RENOMBRAR", background="#eff6ff", foreground="#1e40af")
+        self.tree.tag_configure("SIN_CAMBIO", background="#f0fdf4", foreground="#15803d")
+        self.tree.tag_configure("OMITIR", background="#fef2f2", foreground="#b91c1c")
+        self.tree.tag_configure("COLISION", background="#fffbeb", foreground="#b45309")
 
-        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
+        scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scroll_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Botones inferiores
+        # 6. Barra de Botones Inferior
         bot_bar = ttk.Frame(container)
         bot_bar.pack(fill=tk.X)
 
         self.btn_apply = ttk.Button(
             bot_bar,
-            text="▶ Ejecutar Renombrado Físico",
+            text="▶ Aplicar Renombrado Ahora (Paso 1 en Lote con MySQL y Rollback)",
             style="Primary.TButton",
             command=self._apply_renames,
             state=tk.DISABLED
         )
         self.btn_apply.pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Button(bot_bar, text="Cerrar", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(bot_bar, text="Cerrar Vista Previa", command=self.destroy).pack(side=tk.RIGHT)
 
     def _browse_dir(self):
-        sel = filedialog.askdirectory(title="Seleccionar Carpeta Contenedora", initialdir=self.path_var.get())
+        sel = filedialog.askdirectory(title="Seleccionar Carpeta Raíz", initialdir=self.path_var.get())
         if sel:
             self.path_var.set(sel)
             self._scan_preview()
 
     def _scan_preview(self):
-        root_path = Path(self.path_var.get().strip())
-        if not root_path.is_dir():
-            messagebox.showerror("Error", "La ruta especificada no existe o no es un directorio.")
+        root_path = self.path_var.get().strip()
+        if not root_path or not Path(root_path).is_dir():
+            messagebox.showerror("Error", "La ruta especificada no existe o no es un directorio.", parent=self)
             return
 
+        try:
+            self.plan_result = self.parent_app.service.planificar_paso1(root_path)
+        except Exception as exc:
+            messagebox.showerror("Error en Simulación", f"No se pudo simular el Paso 1: {exc}", parent=self)
+            return
+
+        self.all_items = self.plan_result.get("items", [])
+        self.lbl_total.config(text=f"Total: {self.plan_result.get('total', 0)}")
+        self.lbl_renombrar.config(text=f"✏ Por Renombrar: {self.plan_result.get('renombrar', 0)}")
+        self.lbl_correctas.config(text=f"✔ Ya Correctas: {self.plan_result.get('sin_cambio', 0)}")
+        self.lbl_omitir.config(text=f"⚠ Omitidas: {self.plan_result.get('omitir', 0)}")
+        self.lbl_colisiones.config(text=f"⚡ Colisiones (_N): {self.plan_result.get('colisiones', 0)}")
+
+        self._apply_filter()
+
+        to_ren = self.plan_result.get("renombrar", 0)
+        self.btn_apply.config(state=tk.NORMAL if to_ren > 0 else tk.DISABLED)
+
+    def _apply_filter(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self.preview_data.clear()
 
-        try:
-            subfolders = PDFSelector.get_valid_subfolders(str(root_path))
-        except Exception:
-            subfolders = sorted([f for f in root_path.iterdir() if f.is_dir() and PDFSelector.is_book_folder_name(f.name)])
-        total_sub = len(subfolders)
-        to_rename_cnt = 0
-        already_ok_cnt = 0
+        f_val = self.filter_var.get()
+        s_val = self.search_var.get().strip().lower()
 
-        for idx, f_path in enumerate(subfolders, start=1):
-            prev = self.renamer.preview_folder_rename(f_path)
-            self.preview_data.append(prev)
+        idx = 1
+        for it in self.all_items:
+            acc = it.get("accion", "")
+            motivo = it.get("motivo", "")
+            is_col = (acc == "RENOMBRAR" and motivo != "OK")
 
-            col_str = f"_{prev.get('collision_index')}" if prev.get("collision_index", 0) > 0 else "-"
-            st = prev.get("status", "")
-            if prev.get("needs_rename"):
-                tag = "needs_rename"
-                to_rename_cnt += 1
-                status_txt = "✏ Requiere Renombre"
-            elif st == "YA_TIENE_NOMBRE_CORRECTO":
-                tag = "match"
-                already_ok_cnt += 1
-                status_txt = "✔ Ya Coincide"
-            else:
-                tag = "error"
-                status_txt = f"✖ {st}"
+            if f_val == "SOLO_RENOMBRAR" and acc != "RENOMBRAR":
+                continue
+            if f_val == "SOLO_CORRECTAS" and acc != "SIN_CAMBIO":
+                continue
+            if f_val == "SOLO_OMITIDAS" and acc != "OMITIR":
+                continue
+            if f_val == "SOLO_COLISIONES" and not is_col:
+                continue
 
+            if s_val:
+                search_blob = f"{it.get('carpeta', '')} {it.get('nuevo', '')} {it.get('pdf_base', '')} {motivo}".lower()
+                if s_val not in search_blob:
+                    continue
+
+            tag = "COLISION" if is_col else acc
             self.tree.insert(
                 "",
                 tk.END,
-                iid=f"ren_{idx}",
                 values=(
                     idx,
-                    prev.get("original_name", ""),
-                    prev.get("first_pdf", "-"),
-                    prev.get("suggested_name", "-"),
-                    col_str,
-                    status_txt,
-                    prev.get("detail", prev.get("message", ""))
+                    it.get("carpeta", ""),
+                    it.get("pdf_base", "-"),
+                    it.get("nuevo", "-") or "-",
+                    acc,
+                    motivo
                 ),
                 tags=(tag,)
             )
-
-        total_dup_files = sum(item.get("dup_files_count", 0) for item in self.preview_data)
-        summary_txt = f"Total: {total_sub} carpetas analizadas  |  {to_rename_cnt} por renombrar  |  {already_ok_cnt} ya correctas"
-        if total_dup_files > 0:
-            summary_txt += f"  |  ℹ {total_dup_files} archivos DUP detectados (conservan _DUP para revisión)"
-        self.lbl_summary.config(text=summary_txt)
-        self.btn_apply.config(state=tk.NORMAL if to_rename_cnt > 0 else tk.DISABLED)
+            idx += 1
 
     def _apply_renames(self):
-        items_to_rename = [item for item in self.preview_data if item.get("needs_rename")]
-        if not items_to_rename:
-            messagebox.showinfo("Información", "No hay carpetas pendientes de renombrar.")
+        root_path = self.path_var.get().strip()
+        to_ren = self.plan_result.get("renombrar", 0)
+        if to_ren == 0:
+            messagebox.showinfo("Información", "No hay carpetas por renombrar.", parent=self)
             return
 
         if not messagebox.askyesno(
-            "Confirmar Renombrado Físico",
-            f"¿Deseas aplicar el renombrado físico a las {len(items_to_rename)} carpetas?\n\n"
-            f"• Se tomará el nombre del 1er PDF estándar hasta el año (omitiendo _DUP para el nombre de la carpeta).\n"
-            f"• Si el PDF tiene año '0000', se conservará el año de la carpeta original.\n"
-            f"• Los archivos con _DUP mantendrán su sufijo intacto y serán marcados para revisión manual.\n"
-            f"• Las colisiones se resolverán con _2 solo en la carpeta.\n"
-            f"• MySQL activo: {'Sí' if self.mysql_active_var.get() else 'No'}"
+            "Confirmar Paso 1",
+            f"¿Deseas aplicar el renombrado físico a las {to_ren} carpetas?\n\n"
+            f"• Se tomará el nombre del 1er PDF alfabético hasta la posición del año.\n"
+            f"• Si el 1er PDF tiene año '0000', se conservará tal cual '0000'.\n"
+            f"• Todo se registrará en un lote de MySQL con Rollback 100% atómico.\n"
+            f"• Los PDFs internos NO se modificarán.",
+            parent=self
         ):
             return
 
-        renamed_count = 0
-        error_count = 0
+        self.destroy()
+        self.parent_app.path_var.set(root_path)
+        self.parent_app._execute_step1(root_path)
 
-        # Activar/desactivar MySQL temporalmente según el checkbox
-        prev_enabled = self.parent_app.mysql_manager.enabled
-        self.parent_app.mysql_manager.enabled = self.mysql_active_var.get()
+
+FolderRenamerDialog = DryRunPaso1Dialog
+
+
+class DryRunPaso2Dialog(tk.Toplevel):
+    """
+    Simulación / Dry-Run del Paso 2 (Chequeo de Estructura Pre-IA):
+    - 100% solo lectura (0 tokens de IA gastados, 0 modificaciones en disco).
+    - Clasifica las carpetas en:
+      1. APARTADOS: Estructura discrepante / archivos REG / diferente patrón de 7 posiciones (Paso 2A).
+      2. CORRECTOS: Homogénea 100% sin archivo de carátula externa -> Carátula embebida (Paso 2B).
+      3. REQUIERE_IA: Homogénea 100% con archivo de carátula externa -> Requiere análisis con Claude (Paso 2C).
+    - Permite filtrar y buscar.
+    - Incluye botón para iniciar el Diagnóstico General con IA (Paso 2).
+    """
+    def __init__(self, parent: "OCRLibrosApp", initial_path: str = ""):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("🧪 Dry-Run Paso 2: Chequeo de Estructura Pre-IA (0 Tokens Gastados)")
+        self.geometry("1100x680")
+        self.minsize(900, 520)
+        self.transient(parent)
+        self.grab_set()
+
+        self.plan_result: Dict[str, Any] = {}
+        self.all_items: List[Dict[str, Any]] = []
+        self._build_ui(initial_path)
+        if self.path_var.get().strip():
+            self._scan_preview()
+
+    def _build_ui(self, initial_path: str):
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Selector de Ruta
+        top_frame = ttk.LabelFrame(container, text=" Carpeta Raíz para Chequeo de Estructura ", padding=8)
+        top_frame.pack(fill=tk.X, pady=(0, 6))
+
+        row1 = ttk.Frame(top_frame)
+        row1.pack(fill=tk.X)
+        self.path_var = tk.StringVar(value=initial_path or self.parent_app.path_var.get())
+        ttk.Label(row1, text="Ruta Raíz:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row1, textvariable=self.path_var, font=("Consolas", 9)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(row1, text="Examinar...", command=self._browse_dir).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row1, text="🔍 Simular Estructura (0 Tokens)", style="Primary.TButton", command=self._scan_preview).pack(side=tk.LEFT)
+
+        # 2. Banner Informativo
+        rule_banner = tk.Frame(container, bg="#eff6ff", padx=8, pady=6, relief=tk.SOLID, bd=1)
+        rule_banner.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(
+            rule_banner,
+            text=(
+                "💡 CHEQUEO PRE-IA (0 Tokens): "
+                "Paso 2A: Si algún PDF difiere en las 7 posiciones o es REG -> Directo a Apartados. "
+                "Paso 2B: Si todos coinciden y no hay archivo carátula -> Directo a Correctos (Carátula embebida). "
+                "Paso 2C: Si todos coinciden y hay archivo carátula -> Requiere cotejo visual con IA."
+            ),
+            font=("Segoe UI", 9, "bold"),
+            bg="#eff6ff",
+            fg="#1e40af",
+            justify=tk.LEFT,
+            wraplength=1040
+        ).pack(anchor=tk.W)
+
+        # 3. Badges de Métricas
+        metrics_frame = ttk.Frame(container)
+        metrics_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.lbl_total = tk.Label(metrics_frame, text="Total: 0", font=("Segoe UI", 9, "bold"), bg="#f1f5f9", fg="#334155", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_total.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_apartados = tk.Label(metrics_frame, text="📦 Directo a Apartados: 0", font=("Segoe UI", 9, "bold"), bg="#fef2f2", fg="#b91c1c", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_apartados.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_correctos = tk.Label(metrics_frame, text="✅ Directo a Correctos: 0", font=("Segoe UI", 9, "bold"), bg="#f0fdf4", fg="#15803d", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_correctos.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.lbl_requiere_ia = tk.Label(metrics_frame, text="🔍 Requiere Cotejo con IA: 0", font=("Segoe UI", 9, "bold"), bg="#eff6ff", fg="#1d4ed8", padx=8, pady=4, relief=tk.RIDGE)
+        self.lbl_requiere_ia.pack(side=tk.LEFT)
+
+        # 4. Filtro y Búsqueda
+        filter_frame = ttk.Frame(container)
+        filter_frame.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT, padx=(0, 6))
+        self.filter_var = tk.StringVar(value="TODOS")
+        cb_filter = ttk.Combobox(
+            filter_frame,
+            textvariable=self.filter_var,
+            values=["TODOS", "SOLO_APARTADOS", "SOLO_CORRECTOS", "SOLO_REQUIERE_IA"],
+            state="readonly",
+            width=22
+        )
+        cb_filter.pack(side=tk.LEFT, padx=(0, 14))
+        cb_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
+
+        ttk.Label(filter_frame, text="Buscar:").pack(side=tk.LEFT, padx=(0, 6))
+        self.search_var = tk.StringVar()
+        ent_search = ttk.Entry(filter_frame, textvariable=self.search_var, width=28)
+        ent_search.pack(side=tk.LEFT)
+        ent_search.bind("<KeyRelease>", lambda e: self._apply_filter())
+
+        # 5. Tabla de Vista Previa (Treeview)
+        tree_frame = ttk.Frame(container)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        cols = ("num", "carpeta", "total_pdfs", "caratula", "clasificacion", "accion", "motivo")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
+        self.tree.heading("num", text="#")
+        self.tree.heading("carpeta", text="Carpeta")
+        self.tree.heading("total_pdfs", text="Total PDFs")
+        self.tree.heading("caratula", text="Carátula Externa")
+        self.tree.heading("clasificacion", text="Clasificación")
+        self.tree.heading("accion", text="Acción Recomendada")
+        self.tree.heading("motivo", text="Motivo / Detalle")
+
+        self.tree.column("num", width=45, anchor=tk.CENTER, stretch=False)
+        self.tree.column("carpeta", width=250, anchor=tk.W)
+        self.tree.column("total_pdfs", width=80, anchor=tk.CENTER, stretch=False)
+        self.tree.column("caratula", width=110, anchor=tk.CENTER, stretch=False)
+        self.tree.column("clasificacion", width=130, anchor=tk.CENTER, stretch=False)
+        self.tree.column("accion", width=220, anchor=tk.W)
+        self.tree.column("motivo", width=280, anchor=tk.W)
+
+        self.tree.tag_configure("APARTADOS", background="#fef2f2", foreground="#b91c1c")
+        self.tree.tag_configure("CORRECTOS", background="#f0fdf4", foreground="#15803d")
+        self.tree.tag_configure("REQUIERE_IA", background="#eff6ff", foreground="#1d4ed8")
+
+        scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scroll_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 6. Barra de Botones Inferior
+        bot_bar = ttk.Frame(container)
+        bot_bar.pack(fill=tk.X)
+
+        ttk.Button(
+            bot_bar,
+            text="🔍 Iniciar Diagnóstico General con IA (Paso 2)",
+            style="Action.TButton",
+            command=self._launch_step2_analysis
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(bot_bar, text="Cerrar Vista Previa", command=self.destroy).pack(side=tk.RIGHT)
+
+    def _browse_dir(self):
+        sel = filedialog.askdirectory(title="Seleccionar Carpeta Raíz", initialdir=self.path_var.get())
+        if sel:
+            self.path_var.set(sel)
+            self._scan_preview()
+
+    def _scan_preview(self):
+        root_path = self.path_var.get().strip()
+        if not root_path or not Path(root_path).is_dir():
+            messagebox.showerror("Error", "La ruta especificada no existe o no es un directorio.", parent=self)
+            return
 
         try:
-            for idx, item in enumerate(self.preview_data, start=1):
-                if not item.get("needs_rename"):
-                    continue
-                orig_folder = Path(item["folder_path"])
-                res = self.renamer.execute_folder_rename(orig_folder)
-                iid = f"ren_{idx}"
-                if res.get("applied"):
-                    renamed_count += 1
-                    self.tree.item(
-                        iid,
-                        values=(
-                            idx,
-                            item.get("original_name"),
-                            item.get("first_pdf"),
-                            res.get("suggested_name"),
-                            f"_{res.get('collision_index')}" if res.get("collision_index", 0) > 0 else "-",
-                            "✔ Renombrada",
-                            res.get("message", "OK")
-                        ),
-                        tags=("applied",)
-                    )
-                else:
-                    error_count += 1
-                    self.tree.item(
-                        iid,
-                        values=(
-                            idx,
-                            item.get("original_name"),
-                            item.get("first_pdf"),
-                            item.get("suggested_name"),
-                            "-",
-                            "✖ Error",
-                            res.get("message", "Fallo")
-                        ),
-                        tags=("error",)
-                    )
-        finally:
-            self.parent_app.mysql_manager.enabled = prev_enabled
+            self.plan_result = self.parent_app.service.planificar_paso2_estructura(root_path)
+        except Exception as exc:
+            messagebox.showerror("Error en Chequeo de Estructura", f"No se pudo analizar la estructura: {exc}", parent=self)
+            return
 
-        self.btn_apply.config(state=tk.DISABLED)
-        messagebox.showinfo(
-            "Renombrado Completado",
-            f"Proceso finalizado:\n\n✔ Carpetas renombradas exitosamente: {renamed_count}\n✖ Errores: {error_count}"
-        )
-        self.parent_app.reload_root_preview()
+        self.all_items = self.plan_result.get("items", [])
+        self.lbl_total.config(text=f"Total: {self.plan_result.get('total', 0)}")
+        self.lbl_apartados.config(text=f"📦 Directo a Apartados: {self.plan_result.get('apartados', 0)}")
+        self.lbl_correctos.config(text=f"✅ Directo a Correctos: {self.plan_result.get('correctos', 0)}")
+        self.lbl_requiere_ia.config(text=f"🔍 Requiere Cotejo con IA: {self.plan_result.get('requiere_ia', 0)}")
+
+        self._apply_filter()
+
+    def _apply_filter(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        f_val = self.filter_var.get()
+        s_val = self.search_var.get().strip().lower()
+
+        idx = 1
+        for it in self.all_items:
+            clas = it.get("clasificacion", "")
+
+            if f_val == "SOLO_APARTADOS" and clas != "APARTADOS":
+                continue
+            if f_val == "SOLO_CORRECTOS" and clas != "CORRECTOS":
+                continue
+            if f_val == "SOLO_REQUIERE_IA" and clas != "REQUIERE_IA":
+                continue
+
+            if s_val:
+                search_blob = f"{it.get('carpeta', '')} {it.get('motivo', '')} {it.get('accion', '')}".lower()
+                if s_val not in search_blob:
+                    continue
+
+            car_str = "Sí" if it.get("tiene_caratula") else "No"
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    idx,
+                    it.get("carpeta", ""),
+                    it.get("total_pdfs", 0),
+                    car_str,
+                    clas,
+                    it.get("accion", ""),
+                    it.get("motivo", "")
+                ),
+                tags=(clas,)
+            )
+            idx += 1
+
+    def _launch_step2_analysis(self):
+        root_path = self.path_var.get().strip()
+        self.destroy()
+        self.parent_app.path_var.set(root_path)
+        self.parent_app.start_analysis()
 
 
 class FolderSeparatorDialog(tk.Toplevel):
@@ -2150,6 +2384,7 @@ class OCRLibrosApp(tk.Tk):
         self.service = FolderOCRService()
         self.mysql_manager = MySQLManager(self.service.settings)
         self.is_processing = False
+        self.is_busy = False
         self.stop_requested = False
 
         # Mapa de ruta_carpeta -> ruta_pdf_caratula confirmada o cambiada manualmente por el usuario
@@ -2184,8 +2419,12 @@ class OCRLibrosApp(tk.Tk):
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas MySQL (Original vs Final)...", command=self.open_statistics_dashboard)
         tools_menu.add_separator()
+        tools_menu.add_command(label="🧪 Simular Paso 1 (Dry-Run 0 Escrituras)...", command=self.open_step1_dry_run_dialog)
         tools_menu.add_command(label="📁 Paso 1: Indexar en MySQL y Renombrar por 1er PDF", command=self.run_step1_index_and_rename_async)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🧪 Simular Estructura Pre-IA (Dry-Run 0 Tokens)...", command=self.open_step2_dry_run_dialog)
         tools_menu.add_command(label="🔍 Paso 2: Chequeo de Estructura + Diagnóstico General", command=self.start_analysis)
+        tools_menu.add_separator()
         tools_menu.add_command(label="✅ Paso 3A: Mover Correctas a Dir. Correctos", command=self.run_step3_move_correctos_async)
         tools_menu.add_command(label="📦 Paso 3B: Mover Apartadas a Dir. Apartados", command=self.run_step3_move_apartados_async)
         tools_menu.add_separator()
@@ -2381,6 +2620,7 @@ class OCRLibrosApp(tk.Tk):
 
         top_status_frame = tk.Frame(self.banner_frame, bg="#f1f5f9")
         top_status_frame.pack(fill=tk.X)
+        self.top_status_frame = top_status_frame
 
         self.lbl_veredicto = tk.Label(
             top_status_frame,
@@ -2390,6 +2630,7 @@ class OCRLibrosApp(tk.Tk):
             fg="#334155"
         )
         self.lbl_veredicto.pack(side=tk.LEFT)
+        self.lbl_status = self.lbl_veredicto
 
         self.lbl_info = tk.Label(
             top_status_frame,
@@ -2493,31 +2734,47 @@ class OCRLibrosApp(tk.Tk):
         )
         card_batch.pack(fill=tk.X, pady=(0, 5))
 
+        # Fila 1: Paso 1
         row_b1 = ttk.Frame(card_batch)
         row_b1.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
             row_b1,
-            text="📁 1. Indexar Estado Inicial en MySQL y Renombrar por 1er PDF",
-            style="Primary.TButton",
-            command=self.run_step1_index_and_rename_async
+            text="🧪 Simular Paso 1 (Dry-Run)",
+            command=self.open_step1_dry_run_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_b1,
-            text="🔍 2. Chequeo de Estructura + Diagnóstico General (IA)",
-            style="Action.TButton",
-            command=self.start_analysis
-        ).pack(side=tk.LEFT, padx=(0, 6))
+            text="📁 1. Ejecutar Renombrado (Paso 1)",
+            style="Primary.TButton",
+            command=self.run_step1_index_and_rename_async
+        ).pack(side=tk.LEFT)
 
+        # Fila 2: Paso 2
         row_b2 = ttk.Frame(card_batch)
-        row_b2.pack(fill=tk.X)
+        row_b2.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(
             row_b2,
+            text="🧪 Simular Estructura Pre-IA (Dry-Run 0 Tokens)",
+            command=self.open_step2_dry_run_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="🔍 2. Ejecutar Diagnóstico General (IA)",
+            style="Action.TButton",
+            command=self.start_analysis
+        ).pack(side=tk.LEFT)
+
+        # Fila 3: Paso 3
+        row_b3 = ttk.Frame(card_batch)
+        row_b3.pack(fill=tk.X)
+        ttk.Button(
+            row_b3,
             text="📦 3A. Mover TODAS las Apartadas (por Subcarpeta de Error)",
             style="Warning.TButton",
             command=self.run_step3_move_apartados_async
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
-            row_b2,
+            row_b3,
             text="✅ 3B. Mover TODAS las Correctas (COINCIDE TOTAL) a Dir. Correctos",
             style="Success.TButton",
             command=self.run_step3_move_correctos_async
@@ -2603,9 +2860,9 @@ class OCRLibrosApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             done_toolbar,
-            text="⏪ Revertir (Rollback) Seleccionada a su Estado Inicial",
+            text="⏪ Revertir Último Lote (Rollback)",
             style="Danger.TButton",
-            command=self.rollback_selected_from_done_tab
+            command=self.trigger_rollback_last_batch
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         done_table_frame = ttk.Frame(self.tab_done)
@@ -2667,6 +2924,12 @@ class OCRLibrosApp(tk.Tk):
             text="⏪ Revertir Última Ejecución",
             style="Danger.TButton",
             command=self.trigger_rollback_last_batch
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            audit_toolbar,
+            text="🧪 Verificar BD vs Disco",
+            style="Info.TButton",
+            command=self.verify_integrity
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         audit_table_frame = ttk.Frame(self.tab_audit)
@@ -2755,13 +3018,20 @@ class OCRLibrosApp(tk.Tk):
         MySQLSettingsDialog(self)
 
     def open_folder_renamer_dialog(self):
-        FolderRenamerDialog(self, initial_path=self.path_var.get())
+        self.open_step1_dry_run_dialog()
+
+    def open_step1_dry_run_dialog(self):
+        DryRunPaso1Dialog(self, initial_path=self.path_var.get())
+
+    def open_step2_dry_run_dialog(self):
+        DryRunPaso2Dialog(self, initial_path=self.path_var.get())
 
     def open_folder_separator_dialog(self):
         FolderSeparatorDialog(self, initial_path=self.path_var.get())
 
     def open_rollback_dialog(self):
-        RollbackAndDatabaseDialog(self)
+        self.lbl_status.config(text="Usa la pestaña 'Historial de Ejecuciones y Rollback'.")
+        self.notebook_tabs.select(self.tab_audit)
 
     def open_manual_edit_dialog(self):
         res = self._get_selected_result()
@@ -2770,59 +3040,319 @@ class OCRLibrosApp(tk.Tk):
             return
         ManualEditDialog(self, res)
 
+    # ------------------------------------------------------------------
+    # BLOQUEO GLOBAL MIENTRAS SE EJECUTA UNA OPERACIÓN
+    # ------------------------------------------------------------------
+    def _iter_widgets(self, w):
+        for c in w.winfo_children():
+            yield c
+            yield from self._iter_widgets(c)
+
+    def _set_busy(self, busy: bool, label: str = ""):
+        """
+        Bloquea de forma visible e inequívoca TODOS los controles, botones, menús y pestañas
+        mientras se ejecuta un proceso en lote para evitar cualquier conflicto o condición de carrera.
+        """
+        if busy:
+            self.is_busy = True
+            try:
+                self.config(cursor="watch")
+            except Exception:
+                pass
+
+            # 1. Alerta visual prominente en el banner superior
+            if hasattr(self, "banner_frame"):
+                try:
+                    self.banner_frame.config(bg="#fef3c7", relief=tk.SOLID, bd=2)
+                    if hasattr(self, "top_status_frame"):
+                        self.top_status_frame.config(bg="#fef3c7")
+                    op_title = label.upper() if label else "PROCESO EN CURSO"
+                    self.lbl_veredicto.config(
+                        bg="#fef3c7",
+                        fg="#92400e",
+                        font=("Segoe UI", 11, "bold"),
+                        text=f"⛔ PROCESO EN EJECUCIÓN: {op_title} — CONTROLES BLOQUEADOS"
+                    )
+                    self.lbl_info.config(
+                        bg="#fef3c7",
+                        fg="#b45309",
+                        font=("Segoe UI", 9, "bold"),
+                        text="⏳ Operación en curso. Por favor no cierres la aplicación."
+                    )
+                except Exception:
+                    pass
+
+            # 2. Bloquear cambio de pestañas durante la ejecución
+            if hasattr(self, "notebook_tabs"):
+                try:
+                    self.notebook_tabs.bind("<Button-1>", lambda e: "break")
+                except Exception:
+                    pass
+
+            # 3. Bloquear todos los botones (ttk y tk) excepto el de detener
+            self._busy_saved_buttons = []
+            for w in self._iter_widgets(self):
+                if w is getattr(self, "btn_stop", None):
+                    continue
+                if isinstance(w, ttk.Button):
+                    try:
+                        if not w.instate(["disabled"]):
+                            w.state(["disabled"])
+                            self._busy_saved_buttons.append((w, "ttk"))
+                    except Exception:
+                        pass
+                elif isinstance(w, tk.Button):
+                    try:
+                        if str(w.cget("state")) != "disabled":
+                            w.config(state="disabled")
+                            self._busy_saved_buttons.append((w, "tk"))
+                    except Exception:
+                        pass
+
+            # 4. Deshabilitar elementos del menú
+            self._busy_saved_menu = []
+            try:
+                menubar = self.nametowidget(self.cget("menu"))
+                last = menubar.index("end")
+                for i in range(0, (last or -1) + 1):
+                    if menubar.type(i) != "cascade":
+                        continue
+                    sub = self.nametowidget(menubar.entrycget(i, "menu"))
+                    sub_last = sub.index("end")
+                    for j in range(0, (sub_last or -1) + 1):
+                        if sub.type(j) == "command" and str(sub.entrycget(j, "state")) != "disabled":
+                            sub.entryconfig(j, state="disabled")
+                            self._busy_saved_menu.append((sub, j))
+            except Exception:
+                pass
+
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+        else:
+            # Restaurar cursor
+            try:
+                self.config(cursor="")
+            except Exception:
+                pass
+
+            # Restaurar banner superior
+            if hasattr(self, "banner_frame"):
+                try:
+                    self.banner_frame.config(bg="#f1f5f9", relief=tk.GROOVE, bd=1)
+                    if hasattr(self, "top_status_frame"):
+                        self.top_status_frame.config(bg="#f1f5f9")
+                    self.lbl_veredicto.config(
+                        bg="#f1f5f9",
+                        fg="#15803d",
+                        font=("Segoe UI", 10, "bold"),
+                        text="🟢 Sistema listo — Sin procesos en ejecución"
+                    )
+                    self.lbl_info.config(
+                        bg="#f1f5f9",
+                        fg="#475569",
+                        font=("Segoe UI", 9, "bold"),
+                        text=""
+                    )
+                except Exception:
+                    pass
+
+            # Desbloquear cambio de pestañas
+            if hasattr(self, "notebook_tabs"):
+                try:
+                    self.notebook_tabs.unbind("<Button-1>")
+                except Exception:
+                    pass
+
+            # Restaurar estado previo de los botones
+            for item in getattr(self, "_busy_saved_buttons", []):
+                try:
+                    if isinstance(item, tuple):
+                        w, btype = item
+                        if btype == "ttk":
+                            w.state(["!disabled"])
+                        else:
+                            w.config(state="normal")
+                    elif isinstance(item, ttk.Button):
+                        item.state(["!disabled"])
+                    elif isinstance(item, tk.Button):
+                        item.config(state="normal")
+                except Exception:
+                    pass
+
+            # Restaurar menús
+            for sub, j in getattr(self, "_busy_saved_menu", []):
+                try:
+                    sub.entryconfig(j, state="normal")
+                except Exception:
+                    pass
+
+            self._busy_saved_buttons = []
+            self._busy_saved_menu = []
+            self.is_busy = False
+
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+
+    def _run_exclusive_in_thread(self, label: str, work, on_done):
+        """
+        Ejecuta `work()` en un hilo con la ventana bloqueada. `on_done(result, error)` corre en el hilo de la UI.
+        Si ya hay otra operación en curso se rechaza (no se encola).
+        """
+        if getattr(self, "is_busy", False):
+            messagebox.showwarning("Operación en curso", f"Ya hay una operación en ejecución. Espera a que termine.", parent=self)
+            return
+        self._set_busy(True, label)
+
+        def _runner():
+            res, err = None, None
+            try:
+                res = work()
+            except Exception as exc:
+                err = exc
+            self.after(0, lambda: self._finish_exclusive(on_done, res, err))
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _finish_exclusive(self, on_done, res, err):
+        self._set_busy(False)
+        on_done(res, err)
+
+    def report_callback_exception(self, exc, val, tb):
+        import traceback
+        traceback.print_exception(exc, val, tb)
+        try:
+            messagebox.showerror("Error", f"{exc.__name__}: {val}", parent=self)
+        except Exception:
+            pass
+
+    def verify_integrity(self):
+        """Compara la BD contra el disco real (950 = 950) y reporta faltantes/desconocidas."""
+        scan = []
+        if self.path_var.get().strip():
+            scan.append((self.path_var.get().strip(), 1))
+        if self.validados_var.get().strip():
+            scan.append((self.validados_var.get().strip(), 1))
+        if self.apartados_var.get().strip():
+            scan.append((self.apartados_var.get().strip(), 2))
+
+        def _done(res, err):
+            if err:
+                messagebox.showerror("Verificación", f"No se pudo verificar: {err}", parent=self)
+                return
+            lines = [
+                f"Carpetas indexadas en BD: {res['total_indexadas']}",
+                f"Carpetas físicas encontradas (raíz + correctos + apartados): {res['fisicas_escaneadas']}",
+                f"Esperadas por BD pero NO existen en disco: {len(res['faltantes'])}",
+                f"Existen en disco pero la BD no las conoce: {len(res['desconocidas'])}",
+            ]
+            if res["faltantes"]:
+                lines += ["", "Faltantes (máx 8):"] + res["faltantes"][:8]
+            if res["desconocidas"]:
+                lines += ["", "Desconocidas (máx 8):"] + res["desconocidas"][:8]
+            (messagebox.showinfo if res["congruente"] else messagebox.showwarning)(
+                "✔ BD y disco congruentes" if res["congruente"] else "⚠ Hay incongruencias", "\n".join(lines), parent=self
+            )
+
+        self._run_exclusive_in_thread("Verificando BD vs disco", lambda: self.service.mysql.verificar_invariante(scan), _done)
+
     def run_step1_index_and_rename_async(self):
         """
-        Paso 1 (Asíncrono): Indexa las 950 carpetas y sus PDFs en MySQL (estado original inicial)
-        y renombra cada carpeta por el nombre del 1er PDF hasta el año.
+        Paso 1: primero una VISTA PREVIA (solo lectura) con la regla y lo que se va a renombrar;
+        solo si el usuario confirma se indexa en MySQL y se renombran las CARPETAS (los PDFs no se tocan).
         """
         root_p = self.path_var.get().strip()
         if not root_p or not os.path.isdir(root_p):
             messagebox.showwarning("Atención", "Selecciona una carpeta raíz válida primero.", parent=self)
             return
 
-        if not messagebox.askyesno(
-            "Paso 1: Indexar en MySQL y Renombrar",
-            f"Se indexarán todas las carpetas y PDFs de:\n{root_p}\n\n"
-            "en MySQL (tablas `carpetas_iniciales` y `archivos_iniciales`) y posteriormente "
-            "se renombrarán por su 1er PDF hasta el año.\n\n¿Continuar?",
-            parent=self
-        ):
-            return
+        def _plan_done(plan, err):
+            if err:
+                messagebox.showerror("Paso 1", f"No se pudo planificar: {err}", parent=self)
+                return
+            sample = [i for i in plan["items"] if i["accion"] == "RENOMBRAR"][:10]
+            lines = [f"  {i['carpeta']}\n     → {i['nuevo']}   (PDF base: {i['pdf_base']})" for i in sample]
+            omit = [i for i in plan["items"] if i["accion"] == "OMITIR"][:5]
+            msg = (
+                "REGLA DEL PASO 1\n"
+                "• Se toma el 1er PDF (orden alfabético) que no sea carátula ni REG.\n"
+                "• Nombre nuevo = Deleg_Secc_Libro_Tomo_Vol_Frac_Año leído de ese PDF (Delegación se conserva).\n"
+                "• Si ya existe ese nombre se agrega _2, _3...  • Si el PDF no tiene año, la carpeta NO se toca.\n"
+                "• Solo se renombran CARPETAS; los PDFs no se modifican. Todo queda en un lote con rollback.\n\n"
+                f"Carpetas: {plan['total']}  |  A renombrar: {plan['renombrar']}  |  Ya correctas: {plan['sin_cambio']}  "
+                f"|  Omitidas: {plan['omitir']}  |  Con sufijo _N por colisión: {plan['colisiones']}\n\n"
+                + ("Ejemplos:\n" + "\n".join(lines) if lines else "No hay carpetas por renombrar.")
+                + ("\n\nOmitidas (ejemplos):\n" + "\n".join(f"  {o['carpeta']}: {o['motivo']}" for o in omit) if omit else "")
+                + "\n\n¿Ejecutar el Paso 1?"
+            )
+            if plan["renombrar"] == 0 and plan["omitir"] == 0:
+                messagebox.showinfo("Paso 1", msg, parent=self)
+                return
+            if not messagebox.askyesno("Paso 1: Vista previa", msg, parent=self):
+                return
+            self._execute_step1(root_p)
 
-        def _worker():
-            self.after(0, lambda: self.lbl_status.config(text="Paso 1: Indexando en MySQL y renombrando..."))
-            try:
-                res = self.service.ejecutar_paso1_indexar_y_renombrar(
-                    root_p,
-                    progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
-                )
-                self.after(0, lambda r=res: self._on_step1_finished(r))
-            except Exception as exc:
-                self.after(0, lambda e=str(exc): messagebox.showerror("Error Paso 1", e, parent=self))
+        self._run_exclusive_in_thread("Calculando vista previa del Paso 1", lambda: self.service.planificar_paso1(root_p), _plan_done)
 
-        threading.Thread(target=_worker, daemon=True).start()
+    def _execute_step1(self, root_p: str):
+        def _work():
+            return self.service.ejecutar_paso1_indexar_y_renombrar(
+                root_p,
+                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+            )
+
+        def _done(res, err):
+            if err:
+                self.reload_root_preview()
+                self.refresh_execution_history()
+                messagebox.showerror("Error Paso 1", f"{err}\n\nRevisa la pestaña de Historial: el lote quedó registrado y puede revertirse.", parent=self)
+                return
+            self._on_step1_finished(res)
+
+        self._run_exclusive_in_thread("Paso 1: indexando y renombrando", _work, _done)
 
     def _on_step1_finished(self, res: Dict[str, Any]):
         self.reload_root_preview()
         self.refresh_execution_history()
         self._refresh_header_badge()
         errs = res.get("errores", [])
+        omit = res.get("omitidas", [])
         msg = (
             f"Paso 1 completado (Lote #{res.get('ejecucion_id')}):\n"
             f"• Carpetas totales: {res.get('total_carpetas', 0)}\n"
             f"• Nuevas indexadas en MySQL: {res.get('nuevas_indexadas', 0)}\n"
             f"• Archivos PDF indexados: {res.get('archivos_indexados', 0)}\n"
             f"• Carpetas renombradas: {res.get('renombradas', 0)}\n"
-            f"• PDFs renombrados: {res.get('archivos_renombrados', 0)}"
+            f"• Omitidas (sin cambios): {len(omit)}"
         )
         if errs:
-            msg += f"\n\nAvisos ({len(errs)}):\n" + "\n".join(errs[:5])
+            msg += f"\n\nAvisos ({len(errs)}):\n" + "\n".join(errs[:5]) + "\n\nEl lote se puede revertir desde el Historial."
             messagebox.showwarning("Paso 1 con Avisos", msg, parent=self)
         else:
             messagebox.showinfo("Paso 1 Completado", msg, parent=self)
 
+    def _run_step3(self, mode: str, target_dir: str, label: str):
+        def _work():
+            return self.service.ejecutar_paso3_trasladar_lote(
+                self.all_folder_items, target_dir, mode=mode,
+                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
+            )
+
+        def _done(res, err):
+            if err:
+                self.reload_root_preview()
+                self.refresh_execution_history()
+                messagebox.showerror("Error Paso 3", f"{err}\n\nSi se movió algo, el lote está en el Historial y puede revertirse.", parent=self)
+                return
+            self._on_step3_finished(label, res)
+
+        self._run_exclusive_in_thread(f"Paso 3: moviendo a {label}", _work, _done)
+
     def run_step3_move_correctos_async(self):
-        """Paso 3B (Asíncrono): Mueve todas las carpetas COINCIDE_TOTAL a Dir. Correctos en un lote MySQL."""
+        """Paso 3B: mueve las carpetas COINCIDE_TOTAL a Dir. Correctos en un lote MySQL (con rollback)."""
         validados_dir = self.validados_var.get().strip()
         if not validados_dir:
             messagebox.showwarning("Atención", "Configura primero el directorio de 'Correctos'.", parent=self)
@@ -2831,22 +3361,12 @@ class OCRLibrosApp(tk.Tk):
         if not targets:
             messagebox.showinfo("Sin Pendientes", "No hay carpetas listas (COINCIDE_TOTAL) para mover a Correctos.", parent=self)
             return
-        if not messagebox.askyesno("Paso 3B: Mover Correctas", f"Se moverán {len(targets)} carpeta(s) a:\n{validados_dir}\n\n¿Continuar?", parent=self):
+        if not messagebox.askyesno("Paso 3B: Mover Correctas", f"Se moverán {len(targets)} carpeta(s) a:\n{validados_dir}\n\nQuedará un lote revertible. ¿Continuar?", parent=self):
             return
-
-        def _worker():
-            res = self.service.ejecutar_paso3_trasladar_lote(
-                self.all_folder_items,
-                validados_dir,
-                mode="CORRECTOS",
-                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
-            )
-            self.after(0, lambda r=res: self._on_step3_finished("Correctos", r))
-
-        threading.Thread(target=_worker, daemon=True).start()
+        self._run_step3("CORRECTOS", validados_dir, "Correctos")
 
     def run_step3_move_apartados_async(self):
-        """Paso 3A (Asíncrono): Mueve todas las carpetas con discrepancias/apartar a Dir. Apartados en un lote MySQL."""
+        """Paso 3A: mueve las carpetas marcadas para apartar a Dir. Apartados en un lote MySQL (con rollback)."""
         apartados_dir = self.apartados_var.get().strip()
         if not apartados_dir:
             messagebox.showwarning("Atención", "Configura primero el directorio de 'Apartados'.", parent=self)
@@ -2855,19 +3375,9 @@ class OCRLibrosApp(tk.Tk):
         if not targets:
             messagebox.showinfo("Sin Pendientes", "No hay carpetas marcadas para Apartados.", parent=self)
             return
-        if not messagebox.askyesno("Paso 3A: Mover Apartadas", f"Se moverán {len(targets)} carpeta(s) a:\n{apartados_dir}\n\n¿Continuar?", parent=self):
+        if not messagebox.askyesno("Paso 3A: Mover Apartadas", f"Se moverán {len(targets)} carpeta(s) a:\n{apartados_dir}\n\nQuedará un lote revertible. ¿Continuar?", parent=self):
             return
-
-        def _worker():
-            res = self.service.ejecutar_paso3_trasladar_lote(
-                self.all_folder_items,
-                apartados_dir,
-                mode="APARTADOS",
-                progress_cb=lambda i, t, msg: self.after(0, self._update_async_status, i, t, msg),
-            )
-            self.after(0, lambda r=res: self._on_step3_finished("Apartados", r))
-
-        threading.Thread(target=_worker, daemon=True).start()
+        self._run_step3("APARTADOS", apartados_dir, "Apartados")
 
     def _on_step3_finished(self, dest_label: str, res: Dict[str, Any]):
         self._refresh_all_tabs()
@@ -2909,111 +3419,91 @@ class OCRLibrosApp(tk.Tk):
             )
 
     def trigger_rollback_last_batch(self):
-        """Revierte estrictamente la última ejecución completada en orden cronológico inverso."""
-        last_exec = self.service.mysql.obtener_ultima_ejecucion_revertible() if self.service.mysql else None
+        """Revierte estrictamente el último lote pendiente (orden cronológico inverso), con la ventana bloqueada."""
+        try:
+            last_exec = self.service.mysql.obtener_ultima_ejecucion_revertible()
+        except Exception as exc:
+            messagebox.showerror("Rollback", f"No se pudo consultar MySQL: {exc}", parent=self)
+            return
         if not last_exec:
-            messagebox.showinfo("Sin Lotes Revertibles", "No hay ejecuciones activas pendientes por revertir en MySQL.", parent=self)
+            messagebox.showinfo("Sin Lotes Revertibles", "No hay ejecuciones pendientes por revertir en MySQL.", parent=self)
             return
 
         if not messagebox.askyesno(
             "⏪ Confirmar Rollback de Último Lote",
-            f"Se revertirá únicamente la última ejecución:\n\n"
+            f"Se revertirá ÚNICAMENTE el último lote pendiente:\n\n"
             f"• Lote ID: #{last_exec['id']}\n"
             f"• Tipo: {last_exec['tipo_ejecucion']}\n"
-            f"• Carpetas afectadas: {last_exec.get('total_carpetas', 0)}\n"
-            f"• Archivos afectados: {last_exec.get('total_archivos', 0)}\n\n"
-            "¿Deseas restaurar los nombres y rutas exactamente al estado previo a esta ejecución?",
+            f"• Estado: {last_exec['estado']}\n"
+            f"• Carpetas afectadas: {last_exec.get('total_carpetas_afectadas', 0)}\n"
+            f"• Archivos afectados: {last_exec.get('total_archivos_afectados', 0)}\n\n"
+            "Se restauran nombres y ubicaciones a como estaban justo antes de ese lote.",
             icon="warning",
             parent=self,
         ):
             return
 
-        res = self.service.ejecutar_rollback_ultima_ejecucion()
-        self.reload_root_preview()
-        self.refresh_execution_history()
-        self._refresh_header_badge()
-        if res.get("success"):
-            messagebox.showinfo(
-                "✔ Rollback Completado",
-                f"Lote #{res.get('ejecucion_id')} revertido:\n"
-                f"• Carpetas restauradas: {res.get('folders_reverted', 0)}\n"
-                f"• Archivos restaurados: {res.get('files_reverted', 0)}",
-                parent=self,
-            )
-        else:
-            messagebox.showwarning(
-                "Rollback con Avisos",
-                f"Errores:\n" + "\n".join(res.get("errors", [res.get("error", "Error desconocido")])[:8]),
-                parent=self,
-            )
+        def _done(res, err):
+            self.reload_root_preview()
+            self.refresh_execution_history()
+            self._refresh_header_badge()
+            if err:
+                messagebox.showerror("Rollback", f"{err}", parent=self)
+                return
+            if res.get("success"):
+                messagebox.showinfo(
+                    "✔ Rollback Completado",
+                    f"Lote #{res.get('ejecucion_id')} ({res.get('tipo_ejecucion')}) revertido:\n"
+                    f"• Carpetas restauradas: {res.get('folders_reverted', 0)}\n"
+                    f"• Archivos restaurados: {res.get('files_reverted', 0)}",
+                    parent=self,
+                )
+            else:
+                messagebox.showwarning(
+                    "⚠ Rollback INCOMPLETO",
+                    f"{res.get('message', '')}\n\nProblemas:\n" + "\n".join(res.get("errors", [])[:10]) +
+                    "\n\nEl lote sigue pendiente (REVERSION_PARCIAL). Corrige el conflicto y vuelve a pulsar Revertir: "
+                    "es seguro repetirlo, lo ya restaurado se omite.",
+                    parent=self,
+                )
+
+        self._run_exclusive_in_thread("Rollback de lote", self.service.ejecutar_rollback_ultima_ejecucion, _done)
 
     def trigger_full_system_reset(self):
-        """
-        Revierte todos los lotes en orden cronológico inverso y limpia las 5 tablas de MySQL.
-        """
+        """Revierte TODOS los lotes en orden inverso y, solo si todo salió bien, limpia las tablas de MySQL."""
         msg1 = (
-            "🚨 ATENCIÓN: RESET MAESTRO DE SISTEMA Y MYSQL\n\n"
-            "Esta acción realizará un restablecimiento TOTAL:\n"
-            "1. Rollback por Lotes: Revertirá en orden inverso todas las ejecuciones activas en MySQL.\n"
-            "2. Reinicio de MySQL: Vaciará las 5 tablas de trazabilidad e índices en MySQL.\n\n"
-            "¿Estás seguro de que deseas continuar?"
+            "🚨 RESET MAESTRO\n\n"
+            "1. Revierte en orden inverso TODOS los lotes pendientes.\n"
+            "2. SOLO si todo se revirtió sin problemas, vacía las 5 tablas de MySQL.\n"
+            "   (Si algo falla, la BD se conserva para poder reintentar.)\n\n¿Continuar?"
         )
-        if not messagebox.askyesno("🚨 Confirmar Reset Maestro (Paso 1 de 2)", msg1, icon="warning", parent=self):
+        if not messagebox.askyesno("🚨 Confirmar Reset Maestro (1 de 2)", msg1, icon="warning", parent=self):
             return
+        clear_cache = messagebox.askyesno("Caché de IA (2 de 2)", "¿Vaciar también la caché local de análisis de Claude?", parent=self)
 
-        clear_cache = messagebox.askyesno(
-            "Caché de Inteligencia Artificial (Paso 2 de 2)",
-            "¿Deseas también vaciar la caché local de análisis de Claude?",
-            parent=self
-        )
+        def _done(res, err):
+            self.reload_root_preview()
+            self.refresh_execution_history()
+            self._refresh_header_badge()
+            if err:
+                messagebox.showerror("Reset Maestro", f"{err}", parent=self)
+                return
+            txt = (
+                f"• Lotes revertidos: {res.get('reverted_batches', 0)}\n"
+                f"• Base de datos MySQL: {res['mysql_reset']['msg']}\n"
+                f"• Caché local de Claude: {'Vaciada' if res['cache_cleared'] else 'Conservada'}"
+            )
+            if res.get("rollback_errors"):
+                txt += "\n\nProblemas en rollback:\n" + "\n".join(res["rollback_errors"][:8])
+                messagebox.showwarning("Reset Maestro INCOMPLETO", txt, parent=self)
+            else:
+                messagebox.showinfo("✔ Reset Maestro Completado", txt, parent=self)
 
-        res = self.service.full_system_reset(clear_cache=clear_cache)
-        self.reload_root_preview()
-        self.refresh_execution_history()
-        self._refresh_header_badge()
-
-        messagebox.showinfo(
-            "✔ Reset Maestro Completado",
-            f"El sistema ha vuelto a su estado inicial:\n\n"
-            f"• Lotes revertidos físicamente: {res.get('reverted_batches', 0)}\n"
-            f"• Base de datos MySQL: {res['mysql_reset']['msg']}\n"
-            f"• Caché local de Claude: {'Vaciada' if res['cache_cleared'] else 'Conservada'}",
-            parent=self
-        )
+        self._run_exclusive_in_thread("Reset maestro", lambda: self.service.full_system_reset(clear_cache=clear_cache), _done)
 
     def rollback_selected_folder_direct(self):
-        """Revierte únicamente la carpeta actualmente seleccionada en la tabla."""
-        res = self._get_selected_result()
-        if not res:
-            messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla para revertir.", parent=self)
-            return
-
-        init_folder = res.get("initial_folder_path") or res.get("folder_path")
-        f_name = Path(init_folder).name
-
-        if not messagebox.askyesno(
-            "Revertir Carpeta Seleccionada",
-            f"¿Deseas revertir todos los archivos de la carpeta original:\n'{f_name}'\n\n"
-            "a su estado exacto antes del primer cambio?",
-            parent=self
-        ):
-            return
-
-        rb = self.service.rollback_folder(init_folder)
-        self.reload_root_preview()
-        if rb["errors"]:
-            messagebox.showwarning(
-                "Reversión con Avisos",
-                f"Archivos restaurados: {rb['restored_count']}/{rb['total_candidates']}\n\n"
-                + "\n".join(rb["errors"][:5]),
-                parent=self
-            )
-        else:
-            messagebox.showinfo(
-                "Carpeta Restaurada",
-                f"La carpeta '{f_name}' ({rb['restored_count']} archivos) fue restaurada intacta a su origen inicial.",
-                parent=self
-            )
+        """Obsoleto: el rollback es SOLO por lote (orden cronológico inverso)."""
+        self.trigger_rollback_last_batch()
 
     def _clear_cache_from_menu(self):
         removed = self.service.cache.clear()
@@ -3488,6 +3978,10 @@ class OCRLibrosApp(tk.Tk):
             )
             return
 
+        if getattr(self, "is_busy", False):
+            messagebox.showwarning("Operación en curso", "Espera a que termine la operación actual.")
+            return
+        self._set_busy(True, "Paso 2: diagnóstico")
         self.is_processing = True
         self.stop_requested = False
         self.all_folder_items.clear()
@@ -3636,6 +4130,8 @@ class OCRLibrosApp(tk.Tk):
 
     def _finish_diagnosis(self, total: int, coinciden: int, discrepancias: int, apartar: int, reemplazar: int):
         self.is_processing = False
+        self.is_busy = False
+        self._set_busy(False)
         self.btn_run.config(state=tk.NORMAL, text="🔍 Ejecutar Diagnóstico General (100% Lectura)")
         self.btn_stop.config(state=tk.DISABLED, text="⏹ Detener")
 
@@ -3680,54 +4176,8 @@ class OCRLibrosApp(tk.Tk):
             self._render_single_folder_detail(res)
 
     def rollback_selected_from_done_tab(self):
-        res = self._get_selected_result()
-        if not res:
-            messagebox.showwarning("Atención", "Selecciona primero una carpeta en la pestaña '✅ Ya Hecho / Cambios Aplicados'.")
-            return
-
-        init_folder = res.get("initial_folder_path") or res.get("folder_path", "")
-        if not init_folder or not res.get("applied_actions"):
-            messagebox.showinfo("Sin Cambios Aplicados", "Esta carpeta no tiene cambios aplicados pendientes de revertir.")
-            return
-
-        init_name = Path(init_folder).name
-        curr_name = Path(res.get("folder_path", "")).name
-        if not messagebox.askyesno(
-            "Confirmar Rollback al Estado Inicial",
-            f"¿Deseas revertir la carpeta '{curr_name}' a como estaba exactamente antes del primer cambio?\n\n"
-            f"• Carpeta original: {init_name}\n"
-            f"• Ruta inicial: {init_folder}\n"
-            "• Si se habían reemplazado hojas en blanco o renombrado/movido archivos, volverán intactos a su estado original."
-        ):
-            return
-
-        try:
-            rb_res = self.service.rollback_folder(init_folder)
-            # Re-evaluar la carpeta restaurada en tiempo real para regresarla a su pestaña original
-            if Path(init_folder).exists():
-                restored_diag = self.service.process_folder(init_folder, save_to_db=True)
-                idx = self.all_folder_items.index(res)
-                self.all_folder_items[idx] = restored_diag
-                self._refresh_master_table()
-                self._render_single_folder_detail(restored_diag)
-            else:
-                self._refresh_master_table()
-            self._refresh_header_badge()
-
-            if rb_res["errors"]:
-                messagebox.showwarning(
-                    "Rollback con Avisos",
-                    f"Restaurados: {rb_res['restored_count']}/{rb_res['total_candidates']}\n"
-                    + "\n".join(rb_res["errors"][:10])
-                )
-            else:
-                messagebox.showinfo(
-                    "Rollback Completado en Tiempo Real",
-                    f"La carpeta '{init_name}' ({rb_res['restored_count']} archivos) fue restaurada intacta a su origen inicial "
-                    "y regresó a las pestañas activas."
-                )
-        except Exception as exc:
-            messagebox.showerror("Error en Rollback", str(exc))
+        """Obsoleto: el rollback es SOLO por lote (orden cronológico inverso)."""
+        self.trigger_rollback_last_batch()
 
     def _render_single_folder_detail(self, res: Dict[str, Any]):
         for item in self.tree_fields.get_children():
@@ -4142,10 +4592,13 @@ class OCRLibrosApp(tk.Tk):
         """
         if not targets:
             return
+        if getattr(self, "is_busy", False):
+            messagebox.showwarning("Operación en curso", "Espera a que termine la operación actual.")
+            return
+        self._set_busy(True, op_title)
 
         self.stop_requested = False
         self.btn_stop.config(state=tk.NORMAL)
-        self.btn_run.config(state=tk.DISABLED)
 
         total = len(targets)
         self.progressbar["maximum"] = total
@@ -4211,6 +4664,7 @@ class OCRLibrosApp(tk.Tk):
         results_payload: List[Any]
     ):
         self.btn_stop.config(state=tk.DISABLED)
+        self._set_busy(False)
         self.btn_run.config(state=tk.NORMAL)
         self.progressbar["value"] = total
         status_text = f"✔ {op_title} finalizada ({processed}/{total} carpetas)."

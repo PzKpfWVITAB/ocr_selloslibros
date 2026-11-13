@@ -1,6 +1,9 @@
 import os
+import re
+import functools
+import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple
 import time
 
 from config import PDF_RENDER_DPI, CLAHE_CLIP_LIMIT, CLAHE_TILE_GRID_SIZE
@@ -15,6 +18,31 @@ from src.core.file_operations import FileOperations
 from src.parsers.folder_parser import FolderParser
 from src.matcher.comparator import FolderComparator
 from src.database.mysql_manager import MySQLManager
+
+
+class OperationBusyError(RuntimeError):
+    """Se intentó iniciar una operación que modifica disco/BD mientras otra sigue en curso."""
+
+
+def exclusive_op(label: str):
+    """Exclusión mutua: solo UNA operación que modifique disco/BD a la vez (reentrante en el mismo hilo)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            if not self._op_lock.acquire(blocking=False):
+                raise OperationBusyError(
+                    f"Hay otra operación en curso ({self.current_operation or 'desconocida'}). "
+                    "Espera a que termine antes de iniciar '" + label + "'."
+                )
+            prev = self.current_operation
+            self.current_operation = label
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                self.current_operation = prev
+                self._op_lock.release()
+        return wrapper
+    return deco
 
 
 class FolderOCRService:
@@ -37,6 +65,8 @@ class FolderOCRService:
         self.cache = CacheManager()
         self.settings = SettingsManager.load()
         self.mysql = MySQLManager(self.settings)
+        self._op_lock = threading.RLock()
+        self.current_operation: Optional[str] = None
 
     def reload_settings(self) -> Dict[str, Any]:
         self.settings = SettingsManager.load()
@@ -819,6 +849,10 @@ class FolderOCRService:
         Reemplaza la hoja en blanco adjunta en los PDFs de la carpeta por la página
         con información de la Carátula, respaldando el original para Rollback.
         """
+        raise RuntimeError(
+            "Operación deshabilitada: reemplazar hojas modifica el contenido binario del PDF y NO es reversible. "
+            "El flujo actual es solo-lectura sobre el contenido de los PDFs."
+        )
         insp = diag_result.get("caratula_inspection", {})
         folder_path = diag_result.get("folder_path")
         caratula_path = insp.get("caratula_path")
@@ -862,6 +896,7 @@ class FolderOCRService:
         diag_result["files_modified_count"] = diag_result.get("files_modified_count", 0) + res["replaced_count"]
         return res
 
+    @exclusive_op("Renombrar carpeta")
     def execute_folder_and_pdfs_rename(
         self,
         diag_result: Dict[str, Any],
@@ -919,8 +954,8 @@ class FolderOCRService:
                 insp["caratula_filename"] = new_c_name
                 insp["caratula_path"] = str(new_c_path)
 
-        # Si había una carátula embebida pendiente de creación física en Fase 2:
-        emb_to_create = diag_result.get("embedded_caratula_to_create")
+        # Creación física de carátulas deshabilitada (no reversible)
+        emb_to_create = None
         if emb_to_create:
             target_c_name = f"{res['clean_base_code']}_CARATULA_00.pdf"
             src_pdf = Path(emb_to_create["source_pdf"])
@@ -975,6 +1010,7 @@ class FolderOCRService:
         página 1 compartida en los archivos de la carpeta, independientemente de si la carpeta
         necesita renombrarse o no.
         """
+        return {"created": False, "error": "Operación deshabilitada: crear carátulas modifica archivos y no es reversible."}
         emb_to_create = diag_result.get("embedded_caratula_to_create")
         if not emb_to_create:
             return {"created": False, "message": "No hay carátula embebida pendiente de creación."}
@@ -1202,6 +1238,7 @@ class FolderOCRService:
             "applied_changes": applied_changes,
         }
 
+    @exclusive_op("Mover a Apartados")
     def execute_move_to_apartados(
         self,
         diag_result: Dict[str, Any],
@@ -1264,6 +1301,7 @@ class FolderOCRService:
         diag_result["files_modified_count"] = res["files_moved_count"]
         return res
 
+    @exclusive_op("Mover a Correctos")
     def execute_move_to_validados(
         self,
         diag_result: Dict[str, Any],
@@ -1318,19 +1356,155 @@ class FolderOCRService:
     # NUEVO FLUJO DE 3 PASOS + ROLLBACK POR LOTES (100% MYSQL)
     # =========================================================================
 
+    def _destino_paso1(self, sf: Path) -> Tuple[Optional[str], str, str]:
+        """
+        REGLA DEL PASO 1 (única fuente de verdad, usada por la vista previa y por la ejecución):
+        1. Se toma el PRIMER PDF en orden alfabético que no sea carátula (_CARATULA) ni irregular (REG).
+           Si no hay ninguno, se usa el primer PDF de la carpeta.
+        2. Del nombre de ese PDF se leen sección, libro, tomo, volumen, fraccionamiento y año.
+           La Delegación (posición 1) se conserva SIEMPRE de la carpeta.
+        3. Si ese PDF no tiene año legible -> la carpeta se OMITE (no se toca).
+        4. El nombre nuevo es: Deleg_Secc_Libro_Tomo_Vol_Frac_Año (campos vacíos = 00, año vacío = 0000).
+        5. Si ya existe otra carpeta con ese nombre se agrega _2, _3...
+        Solo se renombra la CARPETA. Los PDFs internos NO se tocan.
+        Retorna (nombre_destino | None, motivo, nombre_del_pdf_base).
+        """
+        pdfs = sorted(
+            [f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+            key=lambda x: x.name,
+        )
+        if not pdfs:
+            return None, "Sin PDFs: no se toca", ""
+        regulars = [
+            p for p in pdfs
+            if "CARATULA" not in p.name.upper()
+            and not CaratulaInspector.is_irregular_reg_pdf_name(p.name)
+        ]
+        first_pdf = regulars[0] if regulars else pdfs[0]
+        stem = Path(first_pdf.name).stem
+        clean_stem = re.sub(r"[_+-]DUP\d*.*$", "", stem, flags=re.IGNORECASE)
+        p_data = FolderParser.parse(clean_stem)
+        toks = clean_stem.split("_")
+
+        anio_val = p_data.get("anio_raw")
+        if not anio_val:
+            if len(toks) >= 7:
+                # Tomar la posición de año (índice 6) sin importar si es 0000 o 4 dígitos
+                anio_val = toks[6]
+            else:
+                return None, f"El 1er PDF '{first_pdf.name}' no tiene suficientes segmentos hasta el año: no se toca", first_pdf.name
+
+        f_data = FolderParser.parse(sf.name)
+        delegacion = str(f_data.get("delegacion") or p_data.get("delegacion") or (toks[0] if toks else "01"))
+        clean_code = FileOperations.build_clean_folder_code(
+            delegacion=delegacion,
+            seccion=p_data.get("seccion_raw") or (toks[1] if len(toks) > 1 else "00"),
+            libro=p_data.get("libro_raw") or (toks[2] if len(toks) > 2 else "00"),
+            tomo=p_data.get("tomo_raw") or (toks[3] if len(toks) > 3 else "00"),
+            volumen=p_data.get("volumen_raw") or (toks[4] if len(toks) > 4 else "00"),
+            fraccionamiento=p_data.get("fraccionamiento_raw") or (toks[5] if len(toks) > 5 else "00"),
+            anio=anio_val or "0000",
+        )
+        return clean_code, "OK", first_pdf.name
+
+    def planificar_paso1(self, root_path: str) -> Dict[str, Any]:
+        """Vista previa (SOLO LECTURA) de lo que haría el Paso 1, simulando colisiones _2/_3."""
+        subfolders = self.get_valid_subfolders(root_path)
+        taken = {p.name.lower() for p in Path(root_path).iterdir() if p.is_dir()} if Path(root_path).is_dir() else set()
+        items: List[Dict[str, Any]] = []
+        for sf in subfolders:
+            code, reason, base_pdf = self._destino_paso1(sf)
+            if code is None:
+                items.append({"carpeta": sf.name, "nuevo": "", "pdf_base": base_pdf, "accion": "OMITIR", "motivo": reason})
+                continue
+            if code.lower() == sf.name.lower():
+                items.append({"carpeta": sf.name, "nuevo": sf.name, "pdf_base": base_pdf, "accion": "SIN_CAMBIO", "motivo": "Ya tiene el nombre correcto"})
+                continue
+            final = code
+            n = 2
+            while final.lower() in taken:
+                final = f"{code}_{n}"
+                n += 1
+            taken.discard(sf.name.lower())
+            taken.add(final.lower())
+            items.append({
+                "carpeta": sf.name, "nuevo": final, "pdf_base": base_pdf, "accion": "RENOMBRAR",
+                "motivo": "Con sufijo por colisión" if final != code else "OK",
+            })
+        return {
+            "total": len(items),
+            "renombrar": sum(1 for i in items if i["accion"] == "RENOMBRAR"),
+            "sin_cambio": sum(1 for i in items if i["accion"] == "SIN_CAMBIO"),
+            "omitir": sum(1 for i in items if i["accion"] == "OMITIR"),
+            "colisiones": sum(1 for i in items if i["accion"] == "RENOMBRAR" and i["motivo"] != "OK"),
+            "items": items,
+        }
+
+    def planificar_paso2_estructura(self, root_path: str) -> Dict[str, Any]:
+        """
+        Vista previa (SOLO LECTURA, 0 TOKENS) del Chequeo de Estructura pre-IA:
+        1. Carpetas que no siguen el patrón de 7 posiciones o con PDFs irregulares (REG) -> APARTADOS directo (Paso 2A).
+        2. Carpetas homogéneas sin archivo de carátula externa -> CORRECTOS directo (carátula embebida, Paso 2B).
+        3. Carpetas homogéneas con archivo de carátula externa -> REQUIERE IA (análisis visual de carátula, Paso 2C).
+        """
+        subfolders = self.get_valid_subfolders(root_path)
+        items: List[Dict[str, Any]] = []
+        for sf in subfolders:
+            struct = self.check_folder_structure(sf)
+            if not struct["is_homogeneous"]:
+                items.append({
+                    "carpeta": sf.name,
+                    "ruta": str(sf),
+                    "total_pdfs": struct["total_pdfs"],
+                    "tiene_caratula": struct["has_caratula_file"],
+                    "clasificacion": "APARTADOS",
+                    "accion": "Directo a Apartados (0 tokens)",
+                    "motivo": struct["reason"],
+                })
+            elif not struct["has_caratula_file"]:
+                items.append({
+                    "carpeta": sf.name,
+                    "ruta": str(sf),
+                    "total_pdfs": struct["total_pdfs"],
+                    "tiene_caratula": False,
+                    "clasificacion": "CORRECTOS",
+                    "accion": "Directo a Correctos (Carátula embebida, 0 tokens)",
+                    "motivo": "Estructura 100% homogénea sin archivo de carátula externa",
+                })
+            else:
+                c_names = ", ".join(struct["caratula_files"][:2])
+                items.append({
+                    "carpeta": sf.name,
+                    "ruta": str(sf),
+                    "total_pdfs": struct["total_pdfs"],
+                    "tiene_caratula": True,
+                    "clasificacion": "REQUIERE_IA",
+                    "accion": "Requiere cotejo visual con IA (Paso 2C)",
+                    "motivo": f"Carátula externa detectada ({c_names})",
+                })
+
+        total = len(items)
+        apartados = sum(1 for i in items if i["clasificacion"] == "APARTADOS")
+        correctos = sum(1 for i in items if i["clasificacion"] == "CORRECTOS")
+        requiere_ia = sum(1 for i in items if i["clasificacion"] == "REQUIERE_IA")
+        return {
+            "total": total,
+            "apartados": apartados,
+            "correctos": correctos,
+            "requiere_ia": requiere_ia,
+            "items": items,
+        }
+
+    @exclusive_op("Paso 1: Indexar y Renombrar")
     def ejecutar_paso1_indexar_y_renombrar(
         self,
         root_path: str,
         progress_cb: Optional[Callable[[int, int, str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        PASO 1:
-        1. Inicializa tablas MySQL si no existen.
-        2. Escanea todas las carpetas válidas y sus PDFs.
-        3. Indexa el estado ORIGINAL INICIAL en `carpetas_iniciales` y `archivos_iniciales` ANTES de renombrar.
-        4. Crea un lote en `ejecuciones_lotes` (PASO_1_INDEXAR_Y_RENOMBRAR).
-        5. Renombra cada carpeta por el nombre del 1er PDF hasta el año (regla de ceros y colisiones _2/_3),
-           registrando cada carpeta y archivo en `auditoria_movimientos_carpetas` y `auditoria_movimientos_archivos`.
+        PASO 1 (ver `_destino_paso1` para la regla exacta):
+        indexa el estado original en MySQL y renombra SOLO carpetas. Cada renombre se registra en el
+        lote; si el registro falla, el renombre se deshace al instante (nada queda sin rollback).
         """
         self.reload_settings()
         ok_db, msg_db = self.mysql.init_database_and_tables()
@@ -1341,12 +1515,8 @@ class FolderOCRService:
         total = len(subfolders)
         if total == 0:
             return {
-                "total_carpetas": 0,
-                "nuevas_indexadas": 0,
-                "archivos_indexados": 0,
-                "renombradas": 0,
-                "errores": [],
-                "ejecucion_id": None,
+                "total_carpetas": 0, "nuevas_indexadas": 0, "archivos_indexados": 0,
+                "renombradas": 0, "archivos_renombrados": 0, "errores": [], "omitidas": [], "ejecucion_id": None,
             }
 
         carpetas_info: List[Dict[str, Any]] = []
@@ -1368,74 +1538,48 @@ class FolderOCRService:
         )
 
         renamed_folders = 0
-        renamed_files = 0
         errors: List[str] = []
-
-        for idx, sf in enumerate(subfolders, start=1):
-            if progress_cb:
-                progress_cb(idx, total, f"Paso 1 ({idx}/{total}): {sf.name}")
-            try:
-                pdfs = sorted(
-                    [f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
-                    key=lambda x: x.name,
-                )
-                if not pdfs:
-                    continue
-
-                regulars = [
-                    p for p in pdfs
-                    if "CARATULA" not in p.name.upper()
-                    and not CaratulaInspector.is_irregular_reg_pdf_name(p.name)
-                ]
-                first_pdf = regulars[0] if regulars else pdfs[0]
-                p_data = FolderParser.parse(first_pdf.name)
-                if not p_data.get("anio_raw"):
-                    continue
-
-                f_data = FolderParser.parse(sf.name)
-                delegacion = str(f_data.get("delegacion") or p_data.get("delegacion") or "01")
-                clean_code = FileOperations.build_clean_folder_code(
-                    delegacion=delegacion,
-                    seccion=p_data.get("seccion_raw") or "00",
-                    libro=p_data.get("libro_raw") or "00",
-                    tomo=p_data.get("tomo_raw") or "00",
-                    volumen=p_data.get("volumen_raw") or "00",
-                    fraccionamiento=p_data.get("fraccionamiento_raw") or "00",
-                    anio=p_data.get("anio_raw") or "0000",
-                )
-                c_uuid = uuid_map.get(str(sf.resolve()))
-                target_folder_path = FileOperations.resolve_directory_collision(
-                    parent_dir=sf.parent,
-                    base_folder_name=clean_code,
-                    current_folder_path=sf,
-                ).resolve()
-
-                if target_folder_path != sf.resolve():
-                    old_folder_name = sf.name
-                    old_folder_str = str(sf.resolve())
-                    os.replace(old_folder_str, str(target_folder_path))
-                    renamed_folders += 1
-                    if self.mysql and getattr(self.mysql, "enabled", False) and c_uuid:
+        omitted: List[str] = []
+        try:
+            for idx, sf in enumerate(subfolders, start=1):
+                if progress_cb:
+                    progress_cb(idx, total, f"Paso 1 ({idx}/{total}): {sf.name}")
+                try:
+                    code, reason, _ = self._destino_paso1(sf)
+                    if code is None:
+                        omitted.append(f"{sf.name}: {reason}")
+                        continue
+                    c_uuid = uuid_map.get(str(sf.resolve()))
+                    target = FileOperations.resolve_directory_collision(
+                        parent_dir=sf.parent, base_folder_name=code, current_folder_path=sf,
+                    ).resolve()
+                    if target == sf.resolve():
+                        continue
+                    old_str, old_name = str(sf.resolve()), sf.name
+                    n_pdfs = len([f for f in sf.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"])
+                    os.replace(old_str, str(target))
+                    try:
+                        if not c_uuid:
+                            raise RuntimeError("carpeta sin UUID en el índice")
                         self.mysql.registrar_movimiento_carpeta(
-                            ejecucion_id=ejecucion_id,
-                            carpeta_uuid=c_uuid,
-                            tipo_accion="RENOMBRADO_CARPETA",
-                            nombre_anterior=old_folder_name,
-                            nombre_nuevo=target_folder_path.name,
-                            ruta_anterior=old_folder_str,
-                            ruta_nueva=str(target_folder_path),
-                            cantidad_archivos=len(pdfs),
+                            ejecucion_id=ejecucion_id, carpeta_uuid=c_uuid, tipo_accion="RENOMBRADO_CARPETA",
+                            nombre_anterior=old_name, nombre_nuevo=target.name,
+                            ruta_anterior=old_str, ruta_nueva=str(target), cantidad_archivos=n_pdfs,
                         )
-            except Exception as exc:
-                errors.append(f"{sf.name}: {exc}")
-
-        self.mysql.finalizar_ejecucion_lote(
-            ejecucion_id=ejecucion_id,
-            total_carpetas=renamed_folders,
-            total_archivos=renamed_files,
-            estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
-            detalles={"errores": errors[:20]} if errors else None,
-        )
+                    except Exception as log_exc:
+                        os.replace(str(target), old_str)  # sin registro no hay rollback: se deshace
+                        raise RuntimeError(f"no se pudo registrar en MySQL, renombre deshecho: {log_exc}")
+                    renamed_folders += 1
+                except Exception as exc:
+                    errors.append(f"{sf.name}: {exc}")
+        finally:
+            self.mysql.finalizar_ejecucion_lote(
+                ejecucion_id=ejecucion_id,
+                total_carpetas=renamed_folders,
+                total_archivos=0,
+                estado="COMPLETADO" if not errors else "COMPLETADO_CON_ERRORES",
+                detalles={"errores": errors[:20], "omitidas": omitted[:50]},
+            )
 
         return {
             "ejecucion_id": ejecucion_id,
@@ -1443,10 +1587,12 @@ class FolderOCRService:
             "nuevas_indexadas": nuevas_idx,
             "archivos_indexados": files_idx,
             "renombradas": renamed_folders,
-            "archivos_renombrados": renamed_files,
+            "archivos_renombrados": 0,
             "errores": errors,
+            "omitidas": omitted,
         }
 
+    @exclusive_op("Paso 3: Traslado por lote")
     def ejecutar_paso3_trasladar_lote(
         self,
         results_list: List[Dict[str, Any]],
@@ -1515,9 +1661,11 @@ class FolderOCRService:
     def obtener_historial_ejecuciones(self) -> List[Dict[str, Any]]:
         return self.mysql.obtener_historial_ejecuciones()
 
+    @exclusive_op("Rollback de lote")
     def ejecutar_rollback_ultima_ejecucion(self) -> Dict[str, Any]:
         return self.mysql.revertir_ultima_ejecucion()
 
+    @exclusive_op("Reset maestro")
     def full_system_reset(self, clear_cache: bool = False) -> Dict[str, Any]:
         """
         Revierte todos los lotes en orden cronológico inverso y limpia MySQL.
@@ -1530,10 +1678,14 @@ class FolderOCRService:
                 if rb.get("success"):
                     reverted_batches += 1
                 else:
-                    rb_errors.extend(rb.get("errores", [rb.get("error", "Error en rollback")]))
+                    rb_errors.extend(rb.get("errors") or [rb.get("message", "Error en rollback")])
                     break
 
-        mysql_ok, mysql_msg = self.mysql.reset_database() if (self.mysql and getattr(self.mysql, "enabled", False)) else (True, "MySQL no activo")
+        if rb_errors:
+            # NO se borra la BD si el rollback quedó incompleto: perderíamos la única forma de recuperar.
+            mysql_ok, mysql_msg = False, "BD conservada: el rollback quedó incompleto (reintenta el rollback)"
+        else:
+            mysql_ok, mysql_msg = self.mysql.reset_database() if (self.mysql and getattr(self.mysql, "enabled", False)) else (True, "MySQL no activo")
 
         cache_cleared = False
         if clear_cache:

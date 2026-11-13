@@ -110,16 +110,10 @@ class FolderRenamerByFirstPdf:
         else:
             prefix = "_".join(tokens[:year_idx + 1])
 
-        # REGLA DEL AÑO 0000: Mantener el año de la carpeta
+        # REGLA DEL AÑO: Si el primer PDF tiene año 0000, se conserva tal cual '0000' hasta ese espacio
         detail_msg = "OK"
         if year_val == "0000":
-            folder_year = cls.extract_year_from_folder_name(folder_original_name)
-            if folder_year:
-                # Reemplazar el 0000 final del prefijo con el año real de la carpeta
-                prefix = re.sub(r"_0000$", f"_{folder_year}", prefix)
-                detail_msg = f"Año 0000 en PDF sustituido por año {folder_year} de la carpeta original"
-            else:
-                detail_msg = "Año 0000 en PDF conservado (la carpeta no tenía año de 4 dígitos detectable)"
+            detail_msg = "Año 0000 en 1er PDF conservado tal cual hasta el espacio de año"
 
         return prefix, detail_msg
 
