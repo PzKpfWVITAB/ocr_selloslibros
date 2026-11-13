@@ -1,6 +1,6 @@
 """
 Interfaz Gráfica (GUI) para Diagnóstico General, Autocorrección de Carátula, Renombrado,
-Auditoría en SQLite ('auditoria_libros.db') y Herramienta de Rollback Total con Claude Sonnet 5.
+Auditoría 100% MySQL y Herramienta de Rollback Atómico con Claude Sonnet 5.
 """
 import os
 import subprocess
@@ -167,23 +167,85 @@ class SettingsDialog(tk.Toplevel):
         self.destroy()
 
 
-class RollbackAndDatabaseDialog(tk.Toplevel):
+
+class ProgressModalDialog(tk.Toplevel):
     """
-    Centro de Rollback Total y Visor de las 2 Tablas SQLite ('detecciones' y 'movimientos_archivos').
-    Permite regresar cualquier archivo individual, carpeta completa o todos los archivos al estado
-    exacto (ruta, nombre y contenido binario SHA-256) que tenían antes del primer cambio.
+    Ventana modal de bloqueo estricto con barra de progreso en tiempo real.
+    Inhabilita la ventana principal e impide cualquier clic o acción concurrente
+    mientras se ejecutan tareas críticas (Paso 1, Paso 2, Rollback).
+    """
+    def __init__(self, parent: tk.Tk, title: str = "Operación en Proceso", initial_msg: str = "Iniciando operación..."):
+        super().__init__(parent)
+        self.parent_win = parent
+        self.title(title)
+        self.geometry("540x190")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # Impedir cierre accidental con 'X'
+        
+        container = ttk.Frame(self, padding=20)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        self.lbl_title = ttk.Label(container, text=title, font=("Segoe UI", 11, "bold"), foreground="#0369a1")
+        self.lbl_title.pack(anchor=tk.W, pady=(0, 6))
+
+        self.lbl_status = ttk.Label(container, text=initial_msg, font=("Segoe UI", 9), wraplength=500)
+        self.lbl_status.pack(anchor=tk.W, pady=(0, 10))
+
+        self.progress_bar = ttk.Progressbar(container, orient=tk.HORIZONTAL, mode="determinate")
+        self.progress_bar.pack(fill=tk.X, pady=(0, 8))
+
+        self.lbl_counter = ttk.Label(container, text="0%", font=("Segoe UI", 9, "bold"), foreground="#475569")
+        self.lbl_counter.pack(anchor=tk.E)
+
+        try:
+            self.grab_set()
+            self.focus_set()
+        except Exception:
+            pass
+        self.update_idletasks()
+
+    def update_progress(self, current: int, total: int, message: str = ""):
+        if total > 0:
+            pct = max(0, min(100, int((current / total) * 100)))
+            self.progress_bar["maximum"] = total
+            self.progress_bar["value"] = current
+            self.lbl_counter.config(text=f"{current:,} de {total:,} ({pct}%)")
+        else:
+            self.progress_bar["mode"] = "indeterminate"
+            self.progress_bar.start(10)
+            self.lbl_counter.config(text="Procesando...")
+
+        if message:
+            self.lbl_status.config(text=message)
+        self.update_idletasks()
+
+    def close(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class MySQLHistoryAndRollbackDialog(tk.Toplevel):
+    """
+    Centro de Historial de Lotes y Rollback LIFO 100% MySQL (trazabilidad_selloslibros).
+    Permite auditar cada ejecución (Paso 1, Diagnóstico, Apartados) y revertir
+    atómicamente en orden cronológico inverso exacto (LIFO).
     """
 
     def __init__(self, parent: "OCRLibrosApp"):
         super().__init__(parent)
         self.parent_app = parent
         self.service = parent.service
-        self.title("⏪ Centro de Rollback al Punto Inicial y Base de Datos SQLite (auditoria_libros.db)")
-        self.geometry("1220x700")
+        self.title("⏪ Historial de Lotes y Rollback Atómico MySQL (trazabilidad_selloslibros)")
+        self.geometry("1240x720")
+        self.minsize(1050, 620)
         self.transient(parent)
         self.grab_set()
 
-        self.candidates_by_iid: Dict[str, Dict[str, Any]] = {}
+        self._lotes_data: Dict[int, Dict[str, Any]] = {}
         self._build_ui()
         self.refresh_all_tabs()
 
@@ -194,17 +256,19 @@ class RollbackAndDatabaseDialog(tk.Toplevel):
         top_bar = ttk.Frame(container)
         top_bar.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(
+        db_name = self.service.mysql.database if self.service.mysql else "trazabilidad_selloslibros"
+        self.lbl_server = ttk.Label(
             top_bar,
-            text=f"Base de Datos SQLite: {self.service.db.db_path}",
-            font=("Consolas", 9, "bold"),
+            text=f"🐬 Servidor MySQL: 127.0.0.1:3306 | Base: {db_name} | Modo: Rollback Atómico LIFO",
+            font=("Segoe UI", 9, "bold"),
             foreground="#0369a1"
-        ).pack(side=tk.LEFT)
+        )
+        self.lbl_server.pack(side=tk.LEFT)
 
-        ttk.Button(top_bar, text="🔄 Actualizar Tablas", command=self.refresh_all_tabs).pack(side=tk.RIGHT)
+        ttk.Button(top_bar, text="🔄 Actualizar Historial", command=self.refresh_all_tabs).pack(side=tk.RIGHT)
         ttk.Button(
             top_bar,
-            text="📊 Dashboard Estadístico & Trazabilidad",
+            text="📊 Abrir Dashboard Ejecutivo",
             style="Primary.TButton",
             command=self._open_stats_dashboard
         ).pack(side=tk.RIGHT, padx=(0, 8))
@@ -212,342 +276,301 @@ class RollbackAndDatabaseDialog(tk.Toplevel):
         self.notebook = ttk.Notebook(container)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Pestaña 1: Rollback al Estado Inicial
-        tab_rb = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(tab_rb, text=" ⏪ 1. Herramienta de Rollback (Restaurar antes del 1er Cambio) ")
+        # Pestaña 1: Lotes de Ejecución
+        tab_lotes = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab_lotes, text=" 📦 1. Lotes de Ejecución (ejecuciones_lotes) ")
 
         info_lbl = ttk.Label(
-            tab_rb,
+            tab_lotes,
             text=(
-                "Aquí se listan todos los archivos que han sufrido algún cambio (reemplazo de hoja en blanco, "
-                "renombrado o envío a apartados).\nAl hacer Rollback, el archivo vuelve exactamente a la ruta, "
-                "nombre y contenido binario (hash SHA-256) que tenía ANTES de su primer cambio."
+                "Cada acción sobre el lote de 950 carpetas genera un lote numerado e inmutable.\n"
+                "La reversión se realiza de forma atómica en orden cronológico inverso (LIFO) "
+                "garantizando la integridad absoluta del sistema de archivos y la invariante de 950 carpetas."
             ),
             foreground="#334155"
         )
         info_lbl.pack(anchor=tk.W, pady=(0, 8))
 
-        rb_btn_frame = ttk.Frame(tab_rb)
-        rb_btn_frame.pack(fill=tk.X, pady=(0, 8))
+        btn_bar = ttk.Frame(tab_lotes)
+        btn_bar.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Button(
-            rb_btn_frame,
-            text="⏪ Revertir Archivo(s) Seleccionado(s) al Origen Inicial",
+            btn_bar,
+            text="⏪ Revertir Último Lote (Rollback LIFO Atómico)",
             style="Primary.TButton",
-            command=self._rollback_selected_files
+            command=self._revertir_ultimo_lote
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Button(
-            rb_btn_frame,
-            text="📁 Revertir Carpeta Completa del Archivo Seleccionado",
-            command=self._rollback_selected_folder
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Button(
-            rb_btn_frame,
-            text="🚨 Revertir TODOS los Cambios Activos (Rollback Total)",
+            btn_bar,
+            text="🚨 Revertir Todos los Lotes Activos (Restaurar todo al Punto Inicial)",
             style="Danger.TButton",
-            command=self._rollback_all
+            command=self._revertir_todos_lotes
         ).pack(side=tk.RIGHT)
 
-        rb_cols = (
-            "carpeta_ini",
-            "archivo_ini",
-            "ruta_actual",
-            "cambios",
-            "paginas",
-            "hash_ini",
-            "backup",
-            "fecha"
-        )
-        self.tree_rb = ttk.Treeview(tab_rb, columns=rb_cols, show="headings", selectmode="extended")
-        self.tree_rb.heading("carpeta_ini", text="Carpeta Original (Antes 1er Cambio)")
-        self.tree_rb.heading("archivo_ini", text="Nombre Original")
-        self.tree_rb.heading("ruta_actual", text="Ubicación / Nombre Actual")
-        self.tree_rb.heading("cambios", text="Cambios Aplicados")
-        self.tree_rb.heading("paginas", text="Págs")
-        self.tree_rb.heading("hash_ini", text="Hash SHA-256 Inicial")
-        self.tree_rb.heading("backup", text="Respaldo Binario")
-        self.tree_rb.heading("fecha", text="Último Movimiento")
+        paned_lotes = ttk.PanedWindow(tab_lotes, orient=tk.VERTICAL)
+        paned_lotes.pack(fill=tk.BOTH, expand=True)
 
-        self.tree_rb.column("carpeta_ini", width=210, anchor=tk.W)
-        self.tree_rb.column("archivo_ini", width=220, anchor=tk.W)
-        self.tree_rb.column("ruta_actual", width=310, anchor=tk.W)
-        self.tree_rb.column("cambios", width=180, anchor=tk.CENTER)
-        self.tree_rb.column("paginas", width=55, anchor=tk.CENTER, stretch=False)
-        self.tree_rb.column("hash_ini", width=120, anchor=tk.CENTER)
-        self.tree_rb.column("backup", width=110, anchor=tk.CENTER)
-        self.tree_rb.column("fecha", width=130, anchor=tk.CENTER)
+        tree_frame = ttk.Frame(paned_lotes)
+        paned_lotes.add(tree_frame, weight=3)
 
-        scroll_rb = ttk.Scrollbar(tab_rb, orient=tk.VERTICAL, command=self.tree_rb.yview)
-        self.tree_rb.configure(yscrollcommand=scroll_rb.set)
-        self.tree_rb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_rb.pack(side=tk.RIGHT, fill=tk.Y)
+        lote_cols = ("id", "tipo", "estado", "carpetas", "archivos", "inicio", "fin")
+        self.tree_lotes = ttk.Treeview(tree_frame, columns=lote_cols, show="headings", selectmode="browse")
+        self.tree_lotes.heading("id", text="# Lote")
+        self.tree_lotes.heading("tipo", text="Tipo de Ejecución")
+        self.tree_lotes.heading("estado", text="Estado del Lote")
+        self.tree_lotes.heading("carpetas", text="Carpetas Afectadas")
+        self.tree_lotes.heading("archivos", text="Archivos Afectados")
+        self.tree_lotes.heading("inicio", text="Fecha Inicio")
+        self.tree_lotes.heading("fin", text="Fecha Fin")
 
-        # Pestaña 2: Tabla SQLite 'movimientos_archivos'
-        tab_mov = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(tab_mov, text=" 📋 2. Tabla SQLite: movimientos_archivos ")
+        self.tree_lotes.column("id", width=65, anchor=tk.CENTER)
+        self.tree_lotes.column("tipo", width=260, anchor=tk.W)
+        self.tree_lotes.column("estado", width=140, anchor=tk.CENTER)
+        self.tree_lotes.column("carpetas", width=140, anchor=tk.CENTER)
+        self.tree_lotes.column("archivos", width=140, anchor=tk.CENTER)
+        self.tree_lotes.column("inicio", width=160, anchor=tk.CENTER)
+        self.tree_lotes.column("fin", width=160, anchor=tk.CENTER)
 
-        mov_cols = (
-            "id", "fecha", "tipo", "nombre_ant", "nombre_nvo",
-            "ruta_ant", "ruta_nva", "hash", "paginas", "revertido"
-        )
-        self.tree_mov = ttk.Treeview(tab_mov, columns=mov_cols, show="headings")
-        self.tree_mov.heading("id", text="ID")
-        self.tree_mov.heading("fecha", text="Fecha")
-        self.tree_mov.heading("tipo", text="Tipo Movimiento")
-        self.tree_mov.heading("nombre_ant", text="Nombre Anterior")
-        self.tree_mov.heading("nombre_nvo", text="Nombre Nuevo")
-        self.tree_mov.heading("ruta_ant", text="Ruta Anterior")
-        self.tree_mov.heading("ruta_nva", text="Ruta Nueva")
-        self.tree_mov.heading("hash", text="Hash SHA-256")
-        self.tree_mov.heading("paginas", text="Págs")
-        self.tree_mov.heading("revertido", text="Estado")
+        self.tree_lotes.tag_configure("completado", background="#f0fdf4", foreground="#166534")
+        self.tree_lotes.tag_configure("revertido", background="#fef2f2", foreground="#991b1b")
+        self.tree_lotes.tag_configure("en_proceso", background="#fefce8", foreground="#854d0e")
 
-        self.tree_mov.column("id", width=45, anchor=tk.CENTER, stretch=False)
-        self.tree_mov.column("fecha", width=130, anchor=tk.CENTER)
-        self.tree_mov.column("tipo", width=160, anchor=tk.CENTER)
-        self.tree_mov.column("nombre_ant", width=210, anchor=tk.W)
-        self.tree_mov.column("nombre_nvo", width=210, anchor=tk.W)
-        self.tree_mov.column("ruta_ant", width=240, anchor=tk.W)
-        self.tree_mov.column("ruta_nva", width=240, anchor=tk.W)
-        self.tree_mov.column("hash", width=110, anchor=tk.CENTER)
-        self.tree_mov.column("paginas", width=55, anchor=tk.CENTER, stretch=False)
-        self.tree_mov.column("revertido", width=95, anchor=tk.CENTER)
+        sc_l = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree_lotes.yview)
+        self.tree_lotes.configure(yscrollcommand=sc_l.set)
+        self.tree_lotes.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_l.pack(side=tk.RIGHT, fill=tk.Y)
 
-        scroll_mov = ttk.Scrollbar(tab_mov, orient=tk.VERTICAL, command=self.tree_mov.yview)
-        self.tree_mov.configure(yscrollcommand=scroll_mov.set)
-        self.tree_mov.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_mov.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_lotes.bind("<<TreeviewSelect>>", self._on_lote_selected)
 
-        # Pestaña 3: Tabla SQLite 'detecciones'
-        tab_det = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(tab_det, text=" 📊 3. Tabla SQLite: detecciones ")
+        det_frame = ttk.LabelFrame(paned_lotes, text=" Detalle Forense del Lote Seleccionado ", padding=6)
+        paned_lotes.add(det_frame, weight=1)
 
-        det_cols = (
-            "id", "fecha", "carpeta", "caratula", "estado_car",
-            "todos_con_car", "esperado", "detectado", "veredicto", "sugerido"
-        )
-        self.tree_det = ttk.Treeview(tab_det, columns=det_cols, show="headings")
-        self.tree_det.heading("id", text="ID")
-        self.tree_det.heading("fecha", text="Fecha")
-        self.tree_det.heading("carpeta", text="Carpeta")
-        self.tree_det.heading("caratula", text="PDF Carátula")
-        self.tree_det.heading("estado_car", text="Estado Carátula")
-        self.tree_det.heading("todos_con_car", text="¿Todos c/Carátula?")
-        self.tree_det.heading("esperado", text="Carpeta [S|L|T|V|A]")
-        self.tree_det.heading("detectado", text="Detectado [S|L|T|V|A]")
-        self.tree_det.heading("veredicto", text="Veredicto")
-        self.tree_det.heading("sugerido", text="Código Sugerido")
+        self.txt_lote_detail = tk.Text(det_frame, font=("Consolas", 9), height=5, wrap=tk.WORD, bg="#f8fafc")
+        sc_det = ttk.Scrollbar(det_frame, orient=tk.VERTICAL, command=self.txt_lote_detail.yview)
+        self.txt_lote_detail.configure(yscrollcommand=sc_det.set)
+        self.txt_lote_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_det.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree_det.column("id", width=45, anchor=tk.CENTER, stretch=False)
-        self.tree_det.column("fecha", width=130, anchor=tk.CENTER)
-        self.tree_det.column("carpeta", width=210, anchor=tk.W)
-        self.tree_det.column("caratula", width=200, anchor=tk.W)
-        self.tree_det.column("estado_car", width=155, anchor=tk.CENTER)
-        self.tree_det.column("todos_con_car", width=115, anchor=tk.CENTER)
-        self.tree_det.column("esperado", width=130, anchor=tk.CENTER)
-        self.tree_det.column("detectado", width=130, anchor=tk.CENTER)
-        self.tree_det.column("veredicto", width=155, anchor=tk.CENTER)
-        self.tree_det.column("sugerido", width=185, anchor=tk.W)
+        # Pestaña 2: Auditoría de Movimientos de Carpetas
+        tab_mc = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab_mc, text=" 📁 2. Movimientos de Carpetas (auditoria_movimientos_carpetas) ")
 
-        scroll_det = ttk.Scrollbar(tab_det, orient=tk.VERTICAL, command=self.tree_det.yview)
-        self.tree_det.configure(yscrollcommand=scroll_det.set)
-        self.tree_det.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_det.pack(side=tk.RIGHT, fill=tk.Y)
+        mc_cols = ("id", "lote", "tipo", "nombre_ant", "nombre_nvo", "fecha", "estado")
+        self.tree_mc = ttk.Treeview(tab_mc, columns=mc_cols, show="headings")
+        self.tree_mc.heading("id", text="ID")
+        self.tree_mc.heading("lote", text="Lote")
+        self.tree_mc.heading("tipo", text="Tipo Acción")
+        self.tree_mc.heading("nombre_ant", text="Nombre Anterior")
+        self.tree_mc.heading("nombre_nvo", text="Nombre Nuevo")
+        self.tree_mc.heading("fecha", text="Fecha de Movimiento")
+        self.tree_mc.heading("estado", text="Estado")
+
+        self.tree_mc.column("id", width=55, anchor=tk.CENTER)
+        self.tree_mc.column("lote", width=65, anchor=tk.CENTER)
+        self.tree_mc.column("tipo", width=180, anchor=tk.W)
+        self.tree_mc.column("nombre_ant", width=280, anchor=tk.W)
+        self.tree_mc.column("nombre_nvo", width=280, anchor=tk.W)
+        self.tree_mc.column("fecha", width=160, anchor=tk.CENTER)
+        self.tree_mc.column("estado", width=110, anchor=tk.CENTER)
+
+        sc_mc = ttk.Scrollbar(tab_mc, orient=tk.VERTICAL, command=self.tree_mc.yview)
+        self.tree_mc.configure(yscrollcommand=sc_mc.set)
+        self.tree_mc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_mc.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Pestaña 3: Auditoría de Movimientos de Archivos
+        tab_ma = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab_ma, text=" 📄 3. Movimientos de Archivos (auditoria_movimientos_archivos) ")
+
+        ma_cols = ("id", "lote", "tipo", "nombre_ant", "nombre_nvo", "paginas", "fecha", "estado")
+        self.tree_ma = ttk.Treeview(tab_ma, columns=ma_cols, show="headings")
+        self.tree_ma.heading("id", text="ID")
+        self.tree_ma.heading("lote", text="Lote")
+        self.tree_ma.heading("tipo", text="Tipo Acción")
+        self.tree_ma.heading("nombre_ant", text="Nombre Anterior")
+        self.tree_ma.heading("nombre_nvo", text="Nombre Nuevo")
+        self.tree_ma.heading("paginas", text="Págs")
+        self.tree_ma.heading("fecha", text="Fecha")
+        self.tree_ma.heading("estado", text="Estado")
+
+        self.tree_ma.column("id", width=55, anchor=tk.CENTER)
+        self.tree_ma.column("lote", width=65, anchor=tk.CENTER)
+        self.tree_ma.column("tipo", width=180, anchor=tk.W)
+        self.tree_ma.column("nombre_ant", width=280, anchor=tk.W)
+        self.tree_ma.column("nombre_nvo", width=280, anchor=tk.W)
+        self.tree_ma.column("paginas", width=55, anchor=tk.CENTER)
+        self.tree_ma.column("fecha", width=160, anchor=tk.CENTER)
+        self.tree_ma.column("estado", width=110, anchor=tk.CENTER)
+
+        sc_ma = ttk.Scrollbar(tab_ma, orient=tk.VERTICAL, command=self.tree_ma.yview)
+        self.tree_ma.configure(yscrollcommand=sc_ma.set)
+        self.tree_ma.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_ma.pack(side=tk.RIGHT, fill=tk.Y)
 
     def refresh_all_tabs(self):
-        # 1. Candidatos de Rollback
-        for item in self.tree_rb.get_children():
-            self.tree_rb.delete(item)
-        self.candidates_by_iid.clear()
+        # 1. Lotes
+        for item in self.tree_lotes.get_children():
+            self.tree_lotes.delete(item)
+        self.txt_lote_detail.delete("1.0", tk.END)
 
-        candidates = self.service.db.get_rollback_candidates()
-        for idx, cand in enumerate(candidates, start=1):
-            iid = f"rb_{idx}"
-            self.candidates_by_iid[iid] = cand
-            has_bkp = "Sí (Pág Original)" if cand.get("backup_contenido_path") else "No requerido"
-            h_ini = (cand.get("hash_origen_inicial") or "")[:14] + "..."
-            self.tree_rb.insert(
-                "",
-                tk.END,
-                iid=iid,
+        historial = self.service.mysql.obtener_historial_ejecuciones() if self.service.mysql else []
+        self._lotes_data = {r["id"]: r for r in historial}
+        for r in historial:
+            st = str(r.get("estado", "DESCONOCIDO"))
+            tag = "completado" if "COMPLETADO" in st else ("revertido" if "REVERTIDO" in st else "en_proceso")
+            self.tree_lotes.insert(
+                "", tk.END,
                 values=(
-                    cand.get("nombre_carpeta_inicial", ""),
-                    cand.get("nombre_origen_inicial", ""),
-                    cand.get("ruta_actual", ""),
-                    f"{cand.get('tipos_movimiento_str', '')} ({cand.get('cantidad_cambios', 1)})",
-                    cand.get("numero_paginas", 0),
-                    h_ini,
-                    has_bkp,
-                    cand.get("ultima_fecha", ""),
-                )
+                    r.get("id"),
+                    r.get("tipo_ejecucion", ""),
+                    st,
+                    r.get("total_carpetas_afectadas", 0),
+                    r.get("total_archivos_afectados", 0),
+                    str(r.get("fecha_inicio") or ""),
+                    str(r.get("fecha_fin") or ""),
+                ),
+                tags=(tag,)
             )
 
-        # 2. Historial de movimientos_archivos
-        for item in self.tree_mov.get_children():
-            self.tree_mov.delete(item)
-        movements = self.service.db.get_movements(include_reverted=True, limit=1000)
-        for m in movements:
-            rev_str = "⏪ REVERTIDO" if m.get("revertido") else "✔ ACTIVO"
-            h_short = (m.get("hash") or "")[:14] + "..."
-            self.tree_mov.insert(
-                "",
-                tk.END,
+        # 2. Movimientos Carpetas
+        for item in self.tree_mc.get_children():
+            self.tree_mc.delete(item)
+        mov_c = self.service.mysql.obtener_todos_movimientos_carpetas(limit=1000) if self.service.mysql else []
+        for m in mov_c:
+            st_l = str(m.get("estado_lote") or "")
+            st_text = "REVERTIDO" if st_l == "REVERTIDO" else "ACTIVO"
+            self.tree_mc.insert(
+                "", tk.END,
                 values=(
                     m.get("id"),
-                    m.get("fecha_movimiento"),
-                    m.get("tipo_movimiento"),
-                    m.get("nombre_anterior"),
-                    m.get("nombre_nuevo"),
-                    m.get("ruta_anterior"),
-                    m.get("ruta_nueva"),
-                    h_short,
-                    m.get("numero_paginas"),
-                    rev_str,
+                    m.get("ejecucion_id"),
+                    m.get("tipo_accion", ""),
+                    m.get("nombre_anterior", ""),
+                    m.get("nombre_nuevo", ""),
+                    str(m.get("fecha_accion") or ""),
+                    st_text,
                 )
             )
 
-        # 3. Historial de detecciones
-        for item in self.tree_det.get_children():
-            self.tree_det.delete(item)
-        dets = self.service.db.get_detections(limit=500)
-        for d in dets:
-            esp = f"{d.get('carpeta_seccion')}|{d.get('carpeta_libro')}|{d.get('carpeta_tomo')}|{d.get('carpeta_volumen')}|{d.get('carpeta_anio')}"
-            det = f"{d.get('detectado_seccion')}|{d.get('detectado_libro')}|{d.get('detectado_tomo')}|{d.get('detectado_volumen')}|{d.get('detectado_anio')}"
-            todos_ok = "Sí" if d.get("todos_pdfs_con_caratula") else "No"
-            self.tree_det.insert(
-                "",
-                tk.END,
+        # 3. Movimientos Archivos
+        for item in self.tree_ma.get_children():
+            self.tree_ma.delete(item)
+        mov_a = self.service.mysql.obtener_todos_movimientos_archivos(limit=1000) if self.service.mysql else []
+        for m in mov_a:
+            st_l = str(m.get("estado_lote") or "")
+            st_text = "REVERTIDO" if st_l == "REVERTIDO" else "ACTIVO"
+            self.tree_ma.insert(
+                "", tk.END,
                 values=(
-                    d.get("id"),
-                    d.get("fecha_registro"),
-                    d.get("nombre_carpeta"),
-                    d.get("pdf_caratula"),
-                    d.get("estado_caratula"),
-                    todos_ok,
-                    esp,
-                    det,
-                    d.get("veredicto"),
-                    d.get("codigo_base_sugerido"),
+                    m.get("id"),
+                    m.get("ejecucion_id"),
+                    m.get("tipo_accion", ""),
+                    m.get("nombre_anterior", ""),
+                    m.get("nombre_nuevo", ""),
+                    m.get("cantidad_paginas", 0),
+                    str(m.get("fecha_accion") or ""),
+                    st_text,
                 )
             )
 
-    def _rollback_selected_files(self):
-        sel = self.tree_rb.selection()
+    def _on_lote_selected(self, event=None):
+        sel = self.tree_lotes.selection()
         if not sel:
-            messagebox.showwarning("Atención", "Selecciona uno o más archivos de la lista para revertir.", parent=self)
+            return
+        lote_id = self.tree_lotes.item(sel[0], "values")[0]
+        lote_data = self._lotes_data.get(int(lote_id))
+        if not lote_data:
             return
 
+        detail = (
+            f"=== DETALLE FORENSE DEL LOTE #{lote_id} ===\n"
+            f"Tipo de Ejecución:      {lote_data.get('tipo_ejecucion')}\n"
+            f"Estado Actual:          {lote_data.get('estado')}\n"
+            f"Fecha de Inicio:        {lote_data.get('fecha_inicio')}\n"
+            f"Fecha de Fin:           {lote_data.get('fecha_fin')}\n"
+            f"Carpetas Afectadas:     {lote_data.get('total_carpetas_afectadas')}\n"
+            f"Archivos Afectados:     {lote_data.get('total_archivos_afectados')}\n"
+            f"Detalles Técnicos JSON:\n{lote_data.get('detalles_json')}\n"
+        )
+        self.txt_lote_detail.delete("1.0", tk.END)
+        self.txt_lote_detail.insert(tk.END, detail)
+
+    def _revertir_ultimo_lote(self):
+        ultimo = self.service.mysql.obtener_ultima_ejecucion_revertible() if self.service.mysql else None
+        if not ultimo:
+            messagebox.showinfo("Sin Lotes Pendientes", "No hay ejecuciones activas pendientes por revertir en MySQL.", parent=self)
+            return
+
+        lote_id = ultimo["id"]
+        tipo = ultimo["tipo_ejecucion"]
+        carps = ultimo.get("total_carpetas_afectadas", 0)
+        archs = ultimo.get("total_archivos_afectados", 0)
+
         if not messagebox.askyesno(
-            "Confirmar Rollback de Archivo(s)",
-            f"¿Deseas restaurar {len(sel)} archivo(s) seleccionado(s) exactamente a como estaban antes del primer cambio?",
+            "Confirmar Rollback LIFO MySQL",
+            f"¿Deseas revertir atómicamente el último lote ejecutado?\n\n"
+            f"• Lote ID: #{lote_id}\n"
+            f"• Tipo: {tipo}\n"
+            f"• Carpetas a restaurar: {carps}\n"
+            f"• Archivos a restaurar: {archs}\n\n"
+            "Se restaurarán los nombres y ubicaciones previas de forma atómica en disco y se marcará como REVERTIDO en MySQL.",
             parent=self
         ):
             return
 
-        restored = 0
-        errors: List[str] = []
-        for iid in sel:
-            cand = self.candidates_by_iid.get(iid)
-            if not cand:
-                continue
-            ok, msg = self.service.rollback_single_file(cand)
-            if ok:
-                restored += 1
+        res = self.service.ejecutar_rollback_ultima_ejecucion()
+        self.refresh_all_tabs()
+        self.parent_app.reload_root_preview()
+        if res.get("success"):
+            messagebox.showinfo(
+                "Rollback Exitoso",
+                f"Lote #{lote_id} ({tipo}) revertido exitosamente.\n"
+                f"Carpetas restauradas: {res.get('folders_reverted', 0)}\n"
+                f"Archivos restaurados: {res.get('files_reverted', 0)}",
+                parent=self
+            )
+        else:
+            errs = res.get("errors", [])
+            messagebox.showerror(
+                "Rollback con Errores",
+                f"El lote #{lote_id} presentó problemas durante la reversión:\n\n" + "\n".join(errs[:8]),
+                parent=self
+            )
+
+    def _revertir_todos_lotes(self):
+        if not messagebox.askyesno(
+            "Confirmar Rollback TOTAL",
+            "ADVERTENCIA CRÍTICA:\n\n"
+            "Esta operación revertirá TODOS los lotes activos en orden cronológico inverso "
+            "hasta dejar todas las carpetas en su nombre y estado original inicial.\n\n"
+            "¿Deseas proceder?",
+            parent=self
+        ):
+            return
+
+        revertidos = 0
+        while self.service.mysql and self.service.mysql.obtener_ultima_ejecucion_revertible():
+            rb = self.service.mysql.revertir_ultima_ejecucion()
+            if rb.get("success"):
+                revertidos += 1
             else:
-                errors.append(msg)
+                messagebox.showerror("Error en Rollback Total", f"Se detuvo en lote: {rb.get('message')}", parent=self)
+                break
 
         self.refresh_all_tabs()
         self.parent_app.reload_root_preview()
-        if errors:
-            messagebox.showwarning(
-                "Rollback Parcial",
-                f"Archivos restaurados: {restored}\nErrores ({len(errors)}):\n" + "\n".join(errors[:10]),
-                parent=self
-            )
-        else:
-            messagebox.showinfo(
-                "Rollback Completado",
-                f"Se restauraron exitosamente {restored} archivo(s) a su ruta, nombre y contenido original.",
-                parent=self
-            )
-
-    def _rollback_selected_folder(self):
-        sel = self.tree_rb.selection()
-        if not sel:
-            messagebox.showwarning(
-                "Atención",
-                "Selecciona cualquier archivo de la carpeta que deseas revertir por completo.",
-                parent=self
-            )
-            return
-
-        cand = self.candidates_by_iid.get(sel[0])
-        if not cand:
-            return
-        init_folder = cand.get("carpeta_origen_inicial", "")
-        folder_name = cand.get("nombre_carpeta_inicial", "")
-
-        if not messagebox.askyesno(
-            "Confirmar Rollback de Carpeta Completa",
-            f"¿Deseas revertir TODOS los archivos de la carpeta original:\n'{folder_name}'\n"
-            f"a su estado exacto antes del primer cambio?",
+        messagebox.showinfo(
+            "Rollback Total Concluido",
+            f"Se revirtieron exitosamente {revertidos} lotes de ejecución en MySQL.",
             parent=self
-        ):
-            return
-
-        res = self.service.rollback_folder(init_folder)
-        self.refresh_all_tabs()
-        self.parent_app.reload_root_preview()
-        if res["errors"]:
-            messagebox.showwarning(
-                "Rollback con Avisos",
-                f"Restaurados: {res['restored_count']}/{res['total_candidates']}\n"
-                + "\n".join(res["errors"][:10]),
-                parent=self
-            )
-        else:
-            messagebox.showinfo(
-                "Carpeta Restaurada",
-                f"La carpeta '{folder_name}' ({res['restored_count']} archivos) fue restaurada intacta a su origen inicial.",
-                parent=self
-            )
-
-    def _rollback_all(self):
-        candidates = self.service.db.get_rollback_candidates()
-        if not candidates:
-            messagebox.showinfo("Sin Cambios Activos", "No hay archivos pendientes por revertir.", parent=self)
-            return
-
-        if not messagebox.askyesno(
-            "Confirmar Rollback Total",
-            f"¿Estás seguro de revertir TODOS los {len(candidates)} archivos modificados en la base de datos "
-            "a su estado original antes del primer cambio?",
-            parent=self
-        ):
-            return
-
-        res = self.service.rollback_all()
-        self.refresh_all_tabs()
-        self.parent_app.reload_root_preview()
-        if res["errors"]:
-            messagebox.showwarning(
-                "Rollback Total con Avisos",
-                f"Restaurados: {res['restored_count']}/{res['total_candidates']}\n"
-                + "\n".join(res["errors"][:10]),
-                parent=self
-            )
-        else:
-            messagebox.showinfo(
-                "Rollback Total Completado",
-                f"Se restauraron intactos los {res['restored_count']} archivos a su ubicación y estado inicial.",
-                parent=self
-            )
+        )
 
     def _open_stats_dashboard(self):
         ExecutiveTraceabilityDashboardDialog(self.parent_app)
 
+
+RollbackAndDatabaseDialog = MySQLHistoryAndRollbackDialog
 
 class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
     """
@@ -567,7 +590,8 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
         self.minsize(1050, 650)
         self.transient(parent)
 
-        self.source_var = tk.StringVar(value="MEMORIA" if parent.all_folder_items else "SQLITE")
+        self.comparison_view_mode = "carpetas"
+        self.source_var = tk.StringVar(value="MYSQL")
         self.search_var = tk.StringVar(value="")
         self.active_filter = "TODOS"
 
@@ -592,6 +616,15 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
             font=("Segoe UI", 9, "bold")
         ).pack(side=tk.LEFT, padx=(0, 6))
 
+        r_my = ttk.Radiobutton(
+            top_bar,
+            text="🐬 Servidor MySQL (trazabilidad_selloslibros)",
+            variable=self.source_var,
+            value="MYSQL",
+            command=self.refresh_data
+        )
+        r_my.pack(side=tk.LEFT, padx=(0, 6))
+
         r_mem = ttk.Radiobutton(
             top_bar,
             text="📌 Sesión en Vivo (Lote en Pantalla)",
@@ -599,27 +632,7 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
             value="MEMORIA",
             command=self.refresh_data
         )
-        r_mem.pack(side=tk.LEFT, padx=(0, 6))
-
-        r_sql = ttk.Radiobutton(
-            top_bar,
-            text="🗄️ SQLite Local (auditoria_libros.db)",
-            variable=self.source_var,
-            value="SQLITE",
-            command=self.refresh_data
-        )
-        r_sql.pack(side=tk.LEFT, padx=(0, 6))
-
-        mysql_on = bool(self.service.mysql and self.service.mysql.enabled)
-        r_my = ttk.Radiobutton(
-            top_bar,
-            text="🐬 Servidor MySQL (trazabilidad_selloslibros)" if mysql_on else "🐬 MySQL (Inactivo)",
-            variable=self.source_var,
-            value="MYSQL",
-            command=self.refresh_data,
-            state=tk.NORMAL if mysql_on else tk.DISABLED
-        )
-        r_my.pack(side=tk.LEFT, padx=(0, 12))
+        r_mem.pack(side=tk.LEFT, padx=(0, 12))
 
         ttk.Button(
             top_bar,
@@ -781,6 +794,12 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
         ent_search.pack(side=tk.LEFT, padx=(0, 10))
         self.search_var.trace_add("write", lambda *args: self._apply_filter())
 
+        ttk.Label(filter_bar, text="Modo Vista:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_v_carp = ttk.Button(filter_bar, text="📁 Vista por Carpetas (950)", command=lambda: self._set_view_mode("carpetas"))
+        self.btn_v_carp.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_v_arch = ttk.Button(filter_bar, text="📄 Vista por Archivos PDF", command=lambda: self._set_view_mode("archivos"))
+        self.btn_v_arch.pack(side=tk.LEFT, padx=(0, 10))
+
         ttk.Label(filter_bar, text="Filtro Rápido:").pack(side=tk.LEFT, padx=(0, 4))
         self.btn_f_all = ttk.Button(filter_bar, text="Todos", command=lambda: self._set_filter("TODOS"))
         self.btn_f_all.pack(side=tk.LEFT, padx=(0, 4))
@@ -856,6 +875,22 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
         self.txt_comp_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc_det.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _set_view_mode(self, mode: str):
+        self.comparison_view_mode = mode
+        if mode == "carpetas":
+            self.tree_comp.heading("orig_name", text="Carpeta Original")
+            self.tree_comp.heading("orig_folder", text="Ruta Original")
+            self.tree_comp.heading("dest_name", text="Carpeta Final / Actual")
+            self.tree_comp.heading("dest_folder", text="Ruta Final / Actual")
+            self.tree_comp.heading("pages", text="PDFs")
+        else:
+            self.tree_comp.heading("orig_name", text="Archivo Original")
+            self.tree_comp.heading("orig_folder", text="Carpeta Original")
+            self.tree_comp.heading("dest_name", text="Archivo Final / Actual")
+            self.tree_comp.heading("dest_folder", text="Carpeta Final / Actual")
+            self.tree_comp.heading("pages", text="Págs")
+        self.refresh_data()
+
     def _set_filter(self, filter_name: str):
         self.active_filter = filter_name
         self._apply_filter()
@@ -894,12 +929,24 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
     def refresh_data(self):
         source = self.source_var.get()
         if source == "MEMORIA":
+            has_insp = bool(self.parent_app.all_folder_items and any(r.get("veredicto_global") and r.get("veredicto_global") != "PENDIENTE_DIAGNOSTICO" for r in self.parent_app.all_folder_items))
+            if not has_insp:
+                messagebox.showinfo(
+                    "Sesión en Vivo no disponible",
+                    "La 'Sesión en Vivo' requiere haber ejecutado el Paso 2 (Diagnóstico).\n\n"
+                    "Conmutando automáticamente a '🐬 Servidor MySQL' para consultar el estado real auditado del lote.",
+                    parent=self
+                )
+                self.source_var.set("MYSQL")
+                source = "MYSQL"
+
+        if source == "MYSQL":
+            self.stats_data = self.service.mysql.get_executive_statistics() if self.service.mysql else {}
+            self.comparison_items = self.service.mysql.obtener_matriz_trazabilidad(self.comparison_view_mode) if self.service.mysql else []
+            db_label = f"MySQL Server: {self.service.mysql.database}" if self.service.mysql else "MySQL"
+        else:
             self.stats_data, self.comparison_items = self._load_memory_data()
             db_label = f"Sesión en Vivo: {len(self.parent_app.all_folder_items)} carpetas"
-        else:
-            self.stats_data = self.service.mysql.get_executive_statistics() if self.service.mysql else {}
-            self.comparison_items = []
-            db_label = f"MySQL Server: {self.service.mysql.database}" if self.service.mysql else "MySQL"
 
         # 1. Actualizar Tarjetas KPI
         t_carp = self.stats_data.get("total_carpetas", 0)
@@ -2366,7 +2413,7 @@ class FolderSeparatorDialog(tk.Toplevel):
 class OCRLibrosApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Auditoría, Diagnóstico, Autocorrección, SQLite y Rollback de Libros Registrales - Claude Sonnet 5")
+        self.title("Auditoría, Diagnóstico, Autocorrección, MySQL y Rollback de Libros Registrales - Claude Sonnet 5")
         self.geometry("1440x920")
         self.minsize(1180, 750)
         try:
@@ -2492,7 +2539,7 @@ class OCRLibrosApp(tk.Tk):
 
         ttk.Label(
             title_col,
-            text="Diagnóstico General, Autocorrección de Carátula, Renombrado, SQLite y Rollback (Claude Sonnet 5)",
+            text="Diagnóstico General, Autocorrección de Carátula, Renombrado, MySQL y Rollback (Claude Sonnet 5)",
             style="Header.TLabel"
         ).pack(anchor=tk.W)
         ttk.Label(
@@ -2519,7 +2566,7 @@ class OCRLibrosApp(tk.Tk):
 
         ttk.Button(
             right_header,
-            text="⏪ Rollback / Base SQLite",
+            text="⏪ Historial y Rollback MySQL",
             style="Action.TButton",
             command=self.open_rollback_dialog
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -3030,8 +3077,7 @@ class OCRLibrosApp(tk.Tk):
         FolderSeparatorDialog(self, initial_path=self.path_var.get())
 
     def open_rollback_dialog(self):
-        self.lbl_status.config(text="Usa la pestaña 'Historial de Ejecuciones y Rollback'.")
-        self.notebook_tabs.select(self.tab_audit)
+        MySQLHistoryAndRollbackDialog(self)
 
     def open_manual_edit_dialog(self):
         res = self._get_selected_result()
@@ -3206,6 +3252,10 @@ class OCRLibrosApp(tk.Tk):
             messagebox.showwarning("Operación en curso", f"Ya hay una operación en ejecución. Espera a que termine.", parent=self)
             return
         self._set_busy(True, label)
+        try:
+            self._current_progress_modal = ProgressModalDialog(self, title=label, initial_msg=f"{label} en curso...")
+        except Exception:
+            self._current_progress_modal = None
 
         def _runner():
             res, err = None, None
@@ -3218,6 +3268,12 @@ class OCRLibrosApp(tk.Tk):
         threading.Thread(target=_runner, daemon=True).start()
 
     def _finish_exclusive(self, on_done, res, err):
+        if getattr(self, "_current_progress_modal", None):
+            try:
+                self._current_progress_modal.close()
+            except Exception:
+                pass
+            self._current_progress_modal = None
         self._set_busy(False)
         on_done(res, err)
 
@@ -4074,7 +4130,7 @@ class OCRLibrosApp(tk.Tk):
                         "Créditos de Claude Agotados",
                         "Tu saldo de créditos en Anthropic API se ha agotado.\n\n"
                         "• El procesamiento se detuvo de forma segura.\n"
-                        "• Todas las carpetas procesadas hasta este punto han quedado guardadas en SQLite y en la caché local.\n"
+                        "• Todas las carpetas procesadas hasta este punto han quedado guardadas en MySQL y en la caché local.\n"
                         "• Para continuar: Recarga créditos en console.anthropic.com o ingresa otra API Key en '⚙ Configurar API Key / Caché'.\n"
                         "• Al volver a pulsar '▶ Analizar Directorio Raíz', las carpetas ya analizadas cargarán al instante con 0 tokens sin gastar nada."
                     )
@@ -4145,7 +4201,7 @@ class OCRLibrosApp(tk.Tk):
             self.progress_var.set(100.0)
             self.lbl_veredicto.config(
                 text=(
-                    f"✔ Diagnóstico General finalizado ({processed} carpetas registradas en SQLite). "
+                    f"✔ Diagnóstico General finalizado ({processed} carpetas registradas en MySQL). "
                     "Revisa las discrepancias antes de aplicar cambios físicos."
                 ),
                 fg="#15803d"
@@ -4360,7 +4416,7 @@ class OCRLibrosApp(tk.Tk):
             f"Se reemplazará la hoja en blanco adjunta en {len(replaceable)} PDFs de la carpeta:\n"
             f"'{folder_name}'\n"
             f"por la página {info_page} (con información) de '{insp.get('caratula_filename')}'.\n\n"
-            "Se guardará respaldo automático para Rollback y se registrará en SQLite. ¿Continuar?"
+            "Se guardará respaldo automático para Rollback y se registrará en MySQL. ¿Continuar?"
         ):
             return
 
@@ -4398,7 +4454,7 @@ class OCRLibrosApp(tk.Tk):
             "• La posición 1 (Delegación) se mantiene intacta.\n"
             "• Si existe otra carpeta con el mismo nombre, a la CARPETA se le agregará _2, _3, etc.\n"
             "• Los archivos PDF internos se renombrarán con el código base SIN _2.\n\n"
-            "¿Deseas aplicar el renombre y registrarlo en SQLite?"
+            "¿Deseas aplicar el renombre y registrarlo en MySQL con Rollback?"
         ):
             return
 
@@ -4486,7 +4542,7 @@ class OCRLibrosApp(tk.Tk):
             f"¿Deseas mover la carpeta '{folder_name}' dentro de la subcarpeta de error:\n\n"
             f"📂 {sub_rev}\n"
             f"Ruta destino: {target_preview}\n\n"
-            "(Se limpiará el nombre hasta el año y se registrará en SQLite con soporte de Rollback)."
+            "(Se limpiará el nombre hasta el año y se registrará en MySQL con soporte de Rollback)."
         ):
             return
 
@@ -4648,6 +4704,11 @@ class OCRLibrosApp(tk.Tk):
     def _update_async_status(self, current: int, total: int, msg: str):
         self.progressbar["value"] = current
         self.lbl_status.config(text=msg)
+        if getattr(self, "_current_progress_modal", None):
+            try:
+                self._current_progress_modal.update_progress(current, total, msg)
+            except Exception:
+                pass
 
     def _on_async_item_finished(self, r: Dict[str, Any], current: int, total: int):
         self.progressbar["value"] = current
@@ -4708,7 +4769,7 @@ class OCRLibrosApp(tk.Tk):
             "  • Inserción o reemplazo de carátulas en PDFs regulares y DUP (archivos REG intactos).\n"
             "  • Extracción y creación física de carátulas embebidas.\n"
             "  • Renombrado de carpetas y PDFs (DUP preservados, REG intactos).\n\n"
-            "Todos los cambios quedarán respaldados en SQLite con soporte de Rollback total.\n"
+            "Todos los cambios quedarán respaldados en MySQL con soporte de Rollback total.\n"
             "El proceso se ejecutará de forma asíncrona sin congelar la ventana.\n\n"
             "¿Deseas continuar?"
         ):
@@ -4852,7 +4913,7 @@ class OCRLibrosApp(tk.Tk):
             "Confirmar Movimiento Masivo de Carpetas Correctas",
             f"Se moverán {len(filtered_targets)} carpeta(s) que están totalmente bien (COINCIDE TOTAL) al directorio:\n"
             f"{validados_dir}\n\n"
-            "Todos los movimientos quedarán registrados en SQLite con Rollback.\n"
+            "Todos los movimientos quedarán registrados en MySQL con Rollback.\n"
             "El proceso se ejecutará de forma asíncrona sin congelar la ventana. ¿Continuar?"
         ):
             return

@@ -82,7 +82,7 @@ class SettingsManager:
             "mysql_user": os.environ.get("MYSQL_USER", "") or env_vars.get("MYSQL_USER", "root"),
             "mysql_password": os.environ.get("MYSQL_PASSWORD", "") or env_vars.get("MYSQL_PASSWORD", ""),
             "mysql_database": os.environ.get("MYSQL_DATABASE", "") or env_vars.get("MYSQL_DATABASE", "trazabilidad_selloslibros"),
-            "mysql_enabled": True if (os.environ.get("MYSQL_ENABLED", "") or env_vars.get("MYSQL_ENABLED", "")).lower() in ["true", "1"] else False,
+            "mysql_enabled": False if (os.environ.get("MYSQL_ENABLED", "") or env_vars.get("MYSQL_ENABLED", "")).lower() in ["false", "0"] else True,
         }
 
         path = cls.get_settings_path()

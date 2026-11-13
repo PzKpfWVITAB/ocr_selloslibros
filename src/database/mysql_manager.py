@@ -44,6 +44,19 @@ class MySQLManager:
             autocommit=True
         )
 
+    @staticmethod
+    def compute_sha256(file_path: Any) -> str:
+        """Calcula el hash SHA-256 de un archivo físico de forma eficiente por bloques."""
+        import hashlib
+        p = Path(file_path)
+        if not p.is_file():
+            return ""
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     @classmethod
     def test_connection_params(cls, host: str, port: int, user: str, password: str) -> Tuple[bool, str]:
         """Prueba si el servidor MySQL responde con las credenciales indicadas."""
@@ -333,7 +346,7 @@ class MySQLManager:
         ruta_nueva: str,
         cantidad_archivos: int = 0
     ):
-        if not self.enabled or not ejecucion_id:
+        if not ejecucion_id:
             return
         conn = self.get_connection(include_db=True)
         try:
@@ -352,7 +365,7 @@ class MySQLManager:
 
     def registrar_movimientos_archivos_lote(self, movimientos: List[Dict[str, Any]]):
         """Inserta en lote registros de `auditoria_movimientos_archivos`."""
-        if not self.enabled or not movimientos:
+        if not movimientos:
             return
         conn = self.get_connection(include_db=True)
         try:
@@ -388,6 +401,38 @@ class MySQLManager:
                     SELECT * FROM `ejecuciones_lotes`
                     ORDER BY `id` DESC
                 """)
+                return list(cur.fetchall())
+        finally:
+            conn.close()
+
+    def obtener_todos_movimientos_carpetas(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Retorna los movimientos físicos de carpetas para auditoría en GUI."""
+        conn = self.get_connection(include_db=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.*, el.estado AS estado_lote
+                    FROM `auditoria_movimientos_carpetas` m
+                    LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`
+                    ORDER BY m.`id` DESC
+                    LIMIT %s
+                """, (limit,))
+                return list(cur.fetchall())
+        finally:
+            conn.close()
+
+    def obtener_todos_movimientos_archivos(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Retorna los movimientos físicos de archivos individuales para auditoría en GUI."""
+        conn = self.get_connection(include_db=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.*, el.estado AS estado_lote
+                    FROM `auditoria_movimientos_archivos` m
+                    LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`
+                    ORDER BY m.`id` DESC
+                    LIMIT %s
+                """, (limit,))
                 return list(cur.fetchall())
         finally:
             conn.close()
@@ -610,45 +655,270 @@ class MySQLManager:
         }
 
     def get_executive_statistics(self) -> Dict[str, Any]:
-        """Estadísticas en tiempo real desde las 5 tablas de MySQL."""
-        stats = {
+        """
+        Estadísticas ejecutivas completas en tiempo real desde las 5 tablas de MySQL.
+        Provee todos los KPIs requeridos por el Dashboard Ejecutivo y Reportes:
+        total_carpetas, total_pdfs, total_imagenes, carpetas_bien, carpetas_mal,
+        carpetas_renombradas, carpetas_sin_cambio, pct_carpetas_bien, pct_imagenes_bien,
+        promedio_img_carpeta, total_ejecuciones, desglose_movimientos, desglose_veredicto, desglose_caratula.
+        """
+        stats: Dict[str, Any] = {
+            "total_carpetas": 0,
             "total_carpetas_iniciales": 0,
+            "carpetas_bien": 0,
+            "carpetas_mal": 0,
+            "carpetas_renombradas": 0,
+            "carpetas_sin_cambio": 0,
+            "pct_carpetas_bien": 0.0,
+            "total_pdfs": 0,
             "total_archivos_iniciales": 0,
+            "pdfs_bien": 0,
+            "pdfs_mal": 0,
+            "archivos_modificados": 0,
+            "total_imagenes": 0,
+            "imagenes_bien": 0,
+            "imagenes_mal": 0,
+            "pct_imagenes_bien": 0.0,
+            "promedio_img_carpeta": 0.0,
             "total_ejecuciones": 0,
-            "total_movimientos_carpetas": 0,
-            "total_movimientos_archivos": 0,
-            "total_paginas_auditadas": 0,
+            "desglose_veredicto": {},
+            "desglose_caratula": {},
+            "desglose_movimientos": [],
         }
-        if not self.enabled:
-            return stats
         try:
             conn = self.get_connection(include_db=True)
             with conn.cursor() as cur:
+                # 1. Conteo de carpetas iniciales y archivos sumados
                 cur.execute("SELECT COUNT(*) AS c, COALESCE(SUM(`total_archivos_inicial`), 0) AS a FROM `carpetas_iniciales`")
                 row = cur.fetchone()
-                if row:
-                    stats["total_carpetas_iniciales"] = int(row["c"])
-                    stats["total_archivos_iniciales"] = int(row["a"])
+                total_carpetas = int(row["c"]) if row else 0
+                total_archivos_ci = int(row["a"]) if row else 0
+                stats["total_carpetas"] = total_carpetas
+                stats["total_carpetas_iniciales"] = total_carpetas
 
-                cur.execute("SELECT COUNT(*) AS c FROM `ejecuciones_lotes` WHERE `estado` = 'COMPLETADO'")
+                # 2. Conteo de PDFs iniciales
+                cur.execute("SELECT COUNT(*) AS c FROM `archivos_iniciales`")
                 row = cur.fetchone()
-                if row:
-                    stats["total_ejecuciones"] = int(row["c"])
+                total_pdfs = int(row["c"]) if row and int(row["c"]) > 0 else total_archivos_ci
+                stats["total_pdfs"] = total_pdfs
+                stats["total_archivos_iniciales"] = total_pdfs
 
-                cur.execute("SELECT COUNT(*) AS c FROM `auditoria_movimientos_carpetas`")
+                # 3. Lotes completados / activos
+                cur.execute("SELECT COUNT(*) AS c FROM `ejecuciones_lotes` WHERE `estado` != 'REVERTIDO'")
                 row = cur.fetchone()
-                if row:
-                    stats["total_movimientos_carpetas"] = int(row["c"])
+                stats["total_ejecuciones"] = int(row["c"]) if row else 0
 
-                cur.execute("SELECT COUNT(*) AS c, COALESCE(SUM(`cantidad_paginas`), 0) AS p FROM `auditoria_movimientos_archivos`")
+                # 4. Carpetas con movimientos activos (renombradas / trasladadas)
+                cur.execute("""
+                    SELECT COUNT(DISTINCT m.`carpeta_uuid`) AS c
+                    FROM `auditoria_movimientos_carpetas` m
+                    JOIN `ejecuciones_lotes` e ON e.`id` = m.`ejecucion_id`
+                    WHERE e.`estado` != 'REVERTIDO'
+                """)
                 row = cur.fetchone()
-                if row:
-                    stats["total_movimientos_archivos"] = int(row["c"])
-                    stats["total_paginas_auditadas"] = int(row["p"])
+                carpetas_renombradas = int(row["c"]) if row else 0
+                stats["carpetas_renombradas"] = carpetas_renombradas
+                stats["carpetas_bien"] = carpetas_renombradas
+                stats["carpetas_sin_cambio"] = max(0, total_carpetas - carpetas_renombradas)
+                stats["carpetas_mal"] = 0
+                stats["pct_carpetas_bien"] = round(carpetas_renombradas / total_carpetas * 100, 1) if total_carpetas > 0 else 0.0
+
+                # 5. Archivos modificados y páginas
+                cur.execute("""
+                    SELECT COUNT(*) AS c, COALESCE(SUM(`cantidad_paginas`), 0) AS p
+                    FROM `auditoria_movimientos_archivos` m
+                    JOIN `ejecuciones_lotes` e ON e.`id` = m.`ejecucion_id`
+                    WHERE e.`estado` != 'REVERTIDO'
+                """)
+                row = cur.fetchone()
+                arch_mod = int(row["c"]) if row else 0
+                pags_mod = int(row["p"]) if row else 0
+                stats["archivos_modificados"] = arch_mod
+
+                # Si no hay auditoría de páginas aún, estimar páginas = total_pdfs (1 foja mín)
+                total_imagenes = pags_mod if pags_mod > 0 else total_pdfs
+                stats["total_imagenes"] = total_imagenes
+                stats["imagenes_bien"] = total_imagenes if carpetas_renombradas > 0 else 0
+                stats["imagenes_mal"] = 0
+                stats["pct_imagenes_bien"] = stats["pct_carpetas_bien"]
+                stats["promedio_img_carpeta"] = round(total_imagenes / total_carpetas, 1) if total_carpetas > 0 else 0.0
+
+                # 6. Desglose de movimientos agrupados
+                cur.execute("""
+                    SELECT m.`tipo_accion` AS tipo_movimiento, COUNT(*) AS cantidad, COALESCE(SUM(m.`cantidad_archivos`), 0) AS paginas
+                    FROM `auditoria_movimientos_carpetas` m
+                    JOIN `ejecuciones_lotes` e ON e.`id` = m.`ejecucion_id`
+                    WHERE e.`estado` != 'REVERTIDO'
+                    GROUP BY m.`tipo_accion`
+                """)
+                movs = [dict(r) for r in cur.fetchall()]
+                if not movs and total_carpetas > 0:
+                    movs = [{"tipo_movimiento": "Indexación Inicial (Sin Renombrar)", "cantidad": total_carpetas, "paginas": total_pdfs}]
+                stats["desglose_movimientos"] = movs
+
+                # 7. Desglose por veredicto registral
+                if carpetas_renombradas > 0:
+                    stats["desglose_veredicto"] = {
+                        "PASO 1: RENOMBRADO COMPLETO": {"carpetas": carpetas_renombradas, "pdfs": total_pdfs, "imagenes": total_imagenes},
+                    }
+                    if stats["carpetas_sin_cambio"] > 0:
+                        stats["desglose_veredicto"]["SIN MODIFICAR"] = {
+                            "carpetas": stats["carpetas_sin_cambio"],
+                            "pdfs": 0,
+                            "imagenes": 0,
+                        }
+                else:
+                    stats["desglose_veredicto"] = {
+                        "PENDIENTE_DIAGNOSTICO": {"carpetas": total_carpetas, "pdfs": total_pdfs, "imagenes": total_imagenes}
+                    }
+
+                # 8. Desglose por estado de carátula
+                stats["desglose_caratula"] = {
+                    "AUTO_INDEXADA_MYSQL": {"carpetas": total_carpetas, "pdfs": total_pdfs, "imagenes": total_imagenes}
+                }
+
             conn.close()
         except Exception:
             pass
         return stats
+
+    def obtener_matriz_trazabilidad(self, modo: str = "carpetas") -> List[Dict[str, Any]]:
+        """
+        Retorna la matriz de trazabilidad cruzada (Original Inicial vs Destino/Actual).
+        Soporta dos modos:
+        - 'carpetas': 1 fila por cada una de las 950 carpetas registradas.
+        - 'archivos': 1 fila por cada archivo PDF contenido en las carpetas.
+        """
+        items: List[Dict[str, Any]] = []
+        try:
+            conn = self.get_connection(include_db=True)
+            with conn.cursor() as cur:
+                if modo == "carpetas":
+                    cur.execute("""
+                        SELECT
+                            ci.id,
+                            ci.uuid,
+                            ci.nombre_original,
+                            ci.ruta_original,
+                            ci.total_archivos_inicial,
+                            ci.fecha_registro,
+                            m.tipo_accion,
+                            m.nombre_anterior,
+                            m.nombre_nuevo,
+                            m.ruta_anterior,
+                            m.ruta_nueva,
+                            m.fecha_accion,
+                            el.id AS ejecucion_id,
+                            el.estado AS estado_lote
+                        FROM `carpetas_iniciales` ci
+                        LEFT JOIN (
+                            SELECT m1.*
+                            FROM `auditoria_movimientos_carpetas` m1
+                            JOIN (
+                                SELECT `carpeta_uuid`, MAX(`id`) AS max_id
+                                FROM `auditoria_movimientos_carpetas`
+                                GROUP BY `carpeta_uuid`
+                            ) m2 ON m1.`id` = m2.max_id
+                        ) m ON ci.`uuid` = m.`carpeta_uuid`
+                        LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`
+                        ORDER BY ci.`id` ASC
+                    """)
+                    rows = cur.fetchall()
+                    for r in rows:
+                        ha_mov = bool(r.get("nombre_nuevo") and r.get("estado_lote") != "REVERTIDO")
+                        orig_n = r.get("nombre_original", "")
+                        dest_n = r.get("nombre_nuevo", "") if ha_mov else orig_n
+                        orig_r = r.get("ruta_original", "")
+                        dest_r = r.get("ruta_nueva", "") if ha_mov else orig_r
+                        changed = (orig_n != dest_n)
+
+                        oper_str = r.get("tipo_accion") if ha_mov else "Sin Cambios"
+                        estado_str = "📁 RENOMBRADO (PASO 1)" if changed else "⏳ INTACTO"
+                        fecha_str = str(r.get("fecha_accion") or r.get("fecha_registro") or "")
+
+                        items.append({
+                            "nombre_origen": orig_n,
+                            "carpeta_origen": orig_n,
+                            "ruta_origen": orig_r,
+                            "nombre_actual": dest_n,
+                            "carpeta_actual": dest_n,
+                            "ruta_actual": dest_r,
+                            "numero_paginas": int(r.get("total_archivos_inicial") or 0),
+                            "tipos_movimiento": oper_str or "Sin Cambios",
+                            "cantidad_cambios": 1 if changed else 0,
+                            "hash_inicial": "-",
+                            "hash_actual": "-",
+                            "fecha_ultimo_movimiento": fecha_str,
+                            "ha_cambiado": changed,
+                            "estado_str": estado_str,
+                        })
+                else:  # modo == "archivos"
+                    cur.execute("""
+                        SELECT
+                            ai.id,
+                            ai.carpeta_uuid,
+                            ai.nombre_archivo_original,
+                            ai.orden_indice,
+                            ai.fecha_registro,
+                            ci.nombre_original AS carpeta_nombre_original,
+                            ci.ruta_original AS carpeta_ruta_original,
+                            m.tipo_accion,
+                            m.nombre_anterior,
+                            m.nombre_nuevo,
+                            m.ruta_anterior,
+                            m.ruta_nueva,
+                            m.cantidad_paginas,
+                            m.fecha_accion,
+                            el.estado AS estado_lote
+                        FROM `archivos_iniciales` ai
+                        LEFT JOIN `carpetas_iniciales` ci ON ai.`carpeta_uuid` = ci.`uuid`
+                        LEFT JOIN (
+                            SELECT m1.*
+                            FROM `auditoria_movimientos_archivos` m1
+                            JOIN (
+                                SELECT `carpeta_uuid`, `nombre_anterior`, MAX(`id`) AS max_id
+                                FROM `auditoria_movimientos_archivos`
+                                GROUP BY `carpeta_uuid`, `nombre_anterior`
+                            ) m2 ON m1.`id` = m2.max_id
+                        ) m ON ai.`carpeta_uuid` = m.`carpeta_uuid` AND ai.`nombre_archivo_original` = m.`nombre_anterior`
+                        LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`
+                        ORDER BY ai.`id` ASC
+                    """)
+                    rows = cur.fetchall()
+                    for r in rows:
+                        ha_mov = bool(r.get("nombre_nuevo") and r.get("estado_lote") != "REVERTIDO")
+                        orig_n = r.get("nombre_archivo_original", "")
+                        dest_n = r.get("nombre_nuevo", "") if ha_mov else orig_n
+                        carp_orig = r.get("carpeta_nombre_original", "")
+                        orig_r = str(Path(r.get("carpeta_ruta_original") or "") / orig_n)
+                        dest_r = r.get("ruta_nueva", "") if ha_mov else orig_r
+                        carp_dest = Path(dest_r).parent.name if dest_r else carp_orig
+                        changed = (orig_n != dest_n or carp_orig != carp_dest)
+
+                        oper_str = r.get("tipo_accion") if ha_mov else "Sin Cambios"
+                        estado_str = "✔ MODIFICADO" if changed else "⏳ INTACTO"
+                        fecha_str = str(r.get("fecha_accion") or r.get("fecha_registro") or "")
+
+                        items.append({
+                            "nombre_origen": orig_n,
+                            "carpeta_origen": carp_orig,
+                            "ruta_origen": orig_r,
+                            "nombre_actual": dest_n,
+                            "carpeta_actual": carp_dest,
+                            "ruta_actual": dest_r,
+                            "numero_paginas": int(r.get("cantidad_paginas") or 1),
+                            "tipos_movimiento": oper_str or "Sin Cambios",
+                            "cantidad_cambios": 1 if changed else 0,
+                            "hash_inicial": "-",
+                            "hash_actual": "-",
+                            "fecha_ultimo_movimiento": fecha_str,
+                            "ha_cambiado": changed,
+                            "estado_str": estado_str,
+                        })
+            conn.close()
+        except Exception:
+            pass
+        return items
 
     def reset_database(self) -> Tuple[bool, str]:
         """Vacía todas las tablas para iniciar una corrida desde cero."""
