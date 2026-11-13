@@ -256,9 +256,20 @@ class FolderOCRService:
         if mismatched_pdfs:
             reasons.append(f"PDFs con diferente patrón de 7 posiciones: {', '.join(mismatched_pdfs[:5])}")
 
+        has_p2_shared = False
+        if not caratula_files and is_homogeneous and regular_pdfs:
+            try:
+                reg_paths = [folder_p / name for name in regular_pdfs]
+                p2_check = CaratulaInspector.detect_shared_blank_p1_with_p2_info(reg_paths)
+                if p2_check is not None:
+                    has_p2_shared = True
+            except Exception as e:
+                logger.debug(f"Aviso detectando P2 compartida en {folder_p.name}: {e}")
+
         return {
             "is_homogeneous": is_homogeneous,
             "has_caratula_file": len(caratula_files) > 0,
+            "has_p2_shared_caratula": has_p2_shared,
             "caratula_files": caratula_files,
             "regular_pdfs": regular_pdfs,
             "mismatched_pdfs": mismatched_pdfs,
@@ -333,51 +344,57 @@ class FolderOCRService:
                 "cache_summary": self.cache.get_summary(),
             }
 
-        # Paso 2B: Carpeta homogénea SIN archivo de carátula independiente (carátula embebida) -> CORRECTA (0 tokens)
+        # Paso 2B: Carpeta homogénea SIN archivo de carátula independiente
         if not struct["has_caratula_file"] and not custom_caratula_path:
-            ev_lines = [
-                f"✅ [0 TOKENS - SIN ARCHIVO CARÁTULA] Todos los {len(struct['regular_pdfs'])} PDFs siguen el patrón exacto de la carpeta (carátula embebida). Lista para Correctos."
-            ]
-            return {
-                "folder_path": str(folder_p),
-                "folder_data": folder_data,
-                "caratula_inspection": {
-                    "status": "CARATULA_EMBEBIDA_OK",
-                    "total_regular_pdfs": len(struct["regular_pdfs"]),
-                    "irregular_pdfs": [],
-                    "dup_pdfs": struct["dup_pdfs"],
-                    "summary_message": ev_lines[0],
-                },
-                "target_pdfs_analyzed": {},
-                "processed_pages_count": 0,
-                "total_elapsed_seconds": round(time.perf_counter() - start_time, 2),
-                "documents_detail": {},
-                "ocr_consolidado": {
-                    "seccion": folder_data.get("seccion_raw") or "00",
-                    "libro": folder_data.get("libro_raw") or "00",
-                    "tomo": folder_data.get("tomo_raw") or "00",
-                    "volumen": folder_data.get("volumen_raw") or "00",
-                    "fraccionamiento": folder_data.get("fraccionamiento_raw") or "00",
-                    "anio": folder_data.get("anio_raw") or "0000",
-                    "es_auxiliar": False,
-                    "evidencias_globales": ev_lines,
-                },
-                "comparacion": {
-                    "veredicto": "COINCIDE_TOTAL",
-                    "discrepancias": [],
-                    "coincidencias": ev_lines,
-                    "propuestas_ceros": [],
-                    "detalles_campos": {},
-                },
-                "veredicto_global": "COINCIDE_TOTAL",
-                "subcarpeta_revision": "",
-                "codigo_base_sugerido": clean_current_code,
-                "needs_page_replacement": False,
-                "needs_rename": False,
-                "needs_apartar": False,
-                "has_discrepancy": False,
-                "cache_summary": self.cache.get_summary(),
-            }
+            # Comprobar si cumple con el patrón de Página 1 en blanco y Página 2 con datos registrales
+            insp_pre = CaratulaInspector.inspect_folder(folder_p)
+            if insp_pre.get("status") == "CARATULA_PAGINA_2_COMPARTIDA":
+                # NO clasificar como directo a Correctos. Debe enviarse a revisión con IA e inserción de carátula.
+                pass
+            else:
+                ev_lines = [
+                    f"✅ [0 TOKENS - SIN ARCHIVO CARÁTULA] Todos los {len(struct['regular_pdfs'])} PDFs siguen el patrón exacto de la carpeta (carátula embebida). Lista para Correctos."
+                ]
+                return {
+                    "folder_path": str(folder_p),
+                    "folder_data": folder_data,
+                    "caratula_inspection": {
+                        "status": "CARATULA_EMBEBIDA_OK",
+                        "total_regular_pdfs": len(struct["regular_pdfs"]),
+                        "irregular_pdfs": [],
+                        "dup_pdfs": struct["dup_pdfs"],
+                        "summary_message": ev_lines[0],
+                    },
+                    "target_pdfs_analyzed": {},
+                    "processed_pages_count": 0,
+                    "total_elapsed_seconds": round(time.perf_counter() - start_time, 2),
+                    "documents_detail": {},
+                    "ocr_consolidado": {
+                        "seccion": folder_data.get("seccion_raw") or "00",
+                        "libro": folder_data.get("libro_raw") or "00",
+                        "tomo": folder_data.get("tomo_raw") or "00",
+                        "volumen": folder_data.get("volumen_raw") or "00",
+                        "fraccionamiento": folder_data.get("fraccionamiento_raw") or "00",
+                        "anio": folder_data.get("anio_raw") or "0000",
+                        "es_auxiliar": False,
+                        "evidencias_globales": ev_lines,
+                    },
+                    "comparacion": {
+                        "veredicto": "COINCIDE_TOTAL",
+                        "discrepancias": [],
+                        "coincidencias": ev_lines,
+                        "propuestas_ceros": [],
+                        "detalles_campos": {},
+                    },
+                    "veredicto_global": "COINCIDE_TOTAL",
+                    "subcarpeta_revision": "",
+                    "codigo_base_sugerido": clean_current_code,
+                    "needs_page_replacement": False,
+                    "needs_rename": False,
+                    "needs_apartar": False,
+                    "has_discrepancy": False,
+                    "cache_summary": self.cache.get_summary(),
+                }
 
         # Paso 2C: Carpeta homogénea CON archivo de carátula independiente -> Inspección y análisis con Claude Vision (2 páginas)
         insp = CaratulaInspector.inspect_folder(folder_p, custom_caratula_path=custom_caratula_path)
@@ -532,11 +549,14 @@ class FolderOCRService:
             info_pages = [p["page_num"] for p in c_pages if p.get("has_text")]
 
         # Determinar qué páginas de la carátula analizar:
+        # - Si es CARATULA_PAGINA_2_COMPARTIDA: analizar exactamente la Página 2 (donde reside el libro/sellos).
         # - Si tiene 1 página: analizar pág. 1.
         # - Si tiene 2 páginas: analizar AMBAS páginas (pág. 1 suele ser la tapa/guarda comercial
         #   y pág. 2 suele ser el Acta de Apertura oficial con sellos, o ambas se complementan).
         # - Si tiene 3 o más páginas: analizar todas las páginas con texto detectado (hasta 3), o las primeras 2.
-        if c_total_pages == 1:
+        if c_status == "CARATULA_PAGINA_2_COMPARTIDA":
+            target_pages = [2]
+        elif c_total_pages == 1:
             target_pages = [1]
         elif c_total_pages == 2:
             target_pages = [1, 2]
@@ -761,35 +781,57 @@ class FolderOCRService:
                 anio=ocr_final.get("anio"),
             )
 
-            # No se modifican páginas binarias de PDFs; verificación 100% de solo lectura
             needs_page_replacement = False
             comp_veredicto = comparison.get("veredicto", "INDETERMINADO")
             needs_rename = False
             needs_apartar = False
             embedded_to_create = None
 
-            has_missing_or_blank_internal = (
-                c_status == "REEMPLAZABLE_HOJA_BLANCA"
-                or len(insp.get("pdfs_missing_caratula", [])) > 0
-                or len(insp.get("replaceable_pdfs", [])) > 0
-            )
-
-            if comp_veredicto == "SIN_DATOS_CARATULA":
-                needs_apartar = True
-                veredicto_global = "CARATULA_SIN_DATOS"
-                subcarpeta_revision = "CARATULA SIN DATOS"
-            elif has_missing_or_blank_internal:
-                needs_apartar = True
-                veredicto_global = "DISCREPANCIA_CARATULA_INTERNA"
-                subcarpeta_revision = "PDFS CON CARATULA BLANCA O FALTANTE"
-            elif comp_veredicto != "COINCIDE_TOTAL":
-                needs_apartar = True
-                needs_rename = True
-                veredicto_global = comp_veredicto
-                subcarpeta_revision = "DISCREPANCIA CARATULA VS CARPETA"
+            if c_status == "CARATULA_PAGINA_2_COMPARTIDA":
+                needs_page_replacement = len(insp.get("replaceable_pdfs", [])) > 0
+                needs_rename = (clean_current_code != codigo_sugerido) or (folder_p.name != codigo_sugerido)
+                if comp_veredicto == "SIN_DATOS_CARATULA":
+                    needs_apartar = True
+                    veredicto_global = "CARATULA_SIN_DATOS"
+                    subcarpeta_revision = "CARATULA SIN DATOS"
+                elif needs_page_replacement or needs_rename:
+                    needs_apartar = False
+                    if needs_page_replacement and needs_rename:
+                        veredicto_global = "REQUIERE_RENOMBRE_E_INSERCION_P2"
+                        subcarpeta_revision = "REQUIERE RENOMBRE E INSERCION P2"
+                    elif needs_page_replacement:
+                        veredicto_global = "REQUIERE_INSERCION_PAGINA_2"
+                        subcarpeta_revision = "REQUIERE INSERCION PAGINA 2"
+                    else:
+                        veredicto_global = "REQUIERE_RENOMBRE"
+                        subcarpeta_revision = "REQUIERE RENOMBRE"
+                else:
+                    veredicto_global = "COINCIDE_TOTAL"
+                    subcarpeta_revision = ""
             else:
-                veredicto_global = "COINCIDE_TOTAL"
-                subcarpeta_revision = ""
+                has_missing_or_blank_internal = (
+                    c_status == "REEMPLAZABLE_HOJA_BLANCA"
+                    or len(insp.get("pdfs_missing_caratula", [])) > 0
+                    or len(insp.get("replaceable_pdfs", [])) > 0
+                )
+
+                if comp_veredicto == "SIN_DATOS_CARATULA":
+                    needs_apartar = True
+                    veredicto_global = "CARATULA_SIN_DATOS"
+                    subcarpeta_revision = "CARATULA SIN DATOS"
+                elif has_missing_or_blank_internal:
+                    needs_apartar = True
+                    needs_page_replacement = (c_status == "REEMPLAZABLE_HOJA_BLANCA" or len(insp.get("replaceable_pdfs", [])) > 0)
+                    veredicto_global = "DISCREPANCIA_CARATULA_INTERNA"
+                    subcarpeta_revision = "PDFS CON CARATULA BLANCA O FALTANTE"
+                elif comp_veredicto != "COINCIDE_TOTAL":
+                    needs_apartar = True
+                    needs_rename = True
+                    veredicto_global = comp_veredicto
+                    subcarpeta_revision = "DISCREPANCIA CARATULA VS CARPETA"
+                else:
+                    veredicto_global = "COINCIDE_TOTAL"
+                    subcarpeta_revision = ""
 
         # REGLA ESTRICTA DE DUP Y REG: Si la carpeta contiene archivos con _DUP o archivos REG/irregulares,
         # se clasifica directamente para Apartado / Revisión y NUNCA se da por COINCIDE_TOTAL.
@@ -847,18 +889,112 @@ class FolderOCRService:
         return None
 
     # =========================================================================
-    # FASE 2: OPERACIONES FÍSICAS Y ROLLBACK TOTAL
+    # FASE 2: OPERACIONES FÍSICAS, MODO DRY RUN Y ROLLBACK TOTAL
     # =========================================================================
 
-    def execute_page_replacement(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+    @exclusive_op("Simulación Dry Run")
+    def execute_dry_run_transformation(
+        self,
+        diag_result: Dict[str, Any],
+        dry_run_dir: Optional[str] = None,
+        custom_clean_base_code: Optional[str] = None,
+        ejecucion_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
-        Reemplaza la hoja en blanco adjunta en los PDFs de la carpeta por la página
-        con información de la Carátula, respaldando el original para Rollback.
+        Ejecuta la transformación física (inserción de carátula en Pág. 2 y renombrado)
+        exclusivamente como una COPIA en 'dry_run_dir', garantizando que los archivos
+        y carpetas originales permanezcan 100% INTACTOS (0 escrituras en origen).
         """
-        raise RuntimeError(
-            "Operación deshabilitada: reemplazar hojas modifica el contenido binario del PDF y NO es reversible. "
-            "El flujo actual es solo-lectura sobre el contenido de los PDFs."
-        )
+        dest_dir = dry_run_dir or self.settings.get("dry_run_output_dir")
+        if not dest_dir or not str(dest_dir).strip():
+            raise ValueError(
+                "No se ha configurado un directorio de salida para Dry Run. "
+                "Por favor selecciona una ruta en 'Ruta Salida Dry Run' antes de continuar."
+            )
+
+        folder_path = diag_result.get("folder_path", "")
+        insp = diag_result.get("caratula_inspection", {})
+        code = (custom_clean_base_code or diag_result.get("codigo_base_sugerido") or "").strip()
+
+        folder_data = diag_result.get("folder_data", {})
+        delegacion_fija = folder_data.get("delegacion") or "01"
+        if code:
+            parts = code.split("_")
+            if len(parts) >= 1 and parts[0] != str(delegacion_fija):
+                parts[0] = str(delegacion_fija)
+                code = "_".join(parts)
+
+        caratula_path = insp.get("caratula_path")
+        info_page_num = int(insp.get("info_page_num") or 2)
+        replaceable = [Path(it["pdf_path"]) for it in insp.get("replaceable_pdfs", [])]
+
+        crear_lote_propio = (ejecucion_id is None)
+        ejec_id = ejecucion_id
+        if crear_lote_propio and self.mysql and getattr(self.mysql, "enabled", False):
+            ejec_id = self.mysql.crear_ejecucion_lote(
+                "DRY_RUN_TRANSFORMACION_COPIA",
+                {"source_folder": Path(folder_path).name, "target_code": code, "dry_run_dir": str(dest_dir)}
+            )
+
+        try:
+            res = FileOperations.execute_folder_dry_run_copy(
+                folder_path=folder_path,
+                dry_run_dest_dir=dest_dir,
+                clean_base_code=code,
+                caratula_source_pdf=caratula_path,
+                info_page_num=info_page_num,
+                target_pdfs=replaceable,
+                mysql_manager=self.mysql,
+                ejecucion_id=ejec_id,
+            )
+            if crear_lote_propio and ejec_id is not None:
+                self.mysql.finalizar_ejecucion_lote(
+                    ejecucion_id=ejec_id,
+                    total_carpetas=1,
+                    total_archivos=res.get("total_files", 0),
+                    detalles={"dry_run_path": res.get("dest_folder_path")}
+                )
+        except Exception as exc:
+            if crear_lote_propio and ejec_id is not None:
+                try:
+                    self.mysql.finalizar_ejecucion_lote(ejec_id, 0, 0, estado="FALLIDO", detalles={"error": str(exc)})
+                except Exception:
+                    pass
+            logger.error(f"Error ejecutando simulación Dry Run para '{folder_path}': {exc}", exc_info=True)
+            raise
+
+        # Registrar en diag_result para la UI sin alterar la ruta física original
+        diag_result["dry_run"] = True
+        diag_result["dry_run_path"] = str(res["dest_folder_path"])
+        diag_result["needs_page_replacement"] = False
+        diag_result["needs_rename"] = False
+        diag_result["veredicto_global"] = "COINCIDE_TOTAL (DRY RUN)"
+        diag_result["needs_apartar"] = False
+        diag_result["has_discrepancy"] = False
+        diag_result["subcarpeta_revision"] = ""
+
+        actions = list(diag_result.get("applied_actions", []))
+        actions.append(f"🧪 [DRY RUN] Copia generada en: {res['dest_folder_name']} ({res['files_transformed']} transformados, {res['files_copied']} copiados)")
+        diag_result["applied_actions"] = actions
+        diag_result["last_action"] = f"🧪 Dry Run Copia ({res['dest_folder_name']})"
+        diag_result["files_modified_count"] = res["total_files"]
+
+        return res
+
+    def execute_page_replacement(
+        self,
+        diag_result: Dict[str, Any],
+        dry_run: Optional[bool] = None,
+        dry_run_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Reemplaza la hoja en blanco adjunta o inserta la página de carátula en los PDFs
+        de la carpeta, respaldando los binarios originales en 'backups_rollback/' para Rollback total.
+        Si 'dry_run' está activo, delega a 'execute_dry_run_transformation'.
+        """
+        is_dry = dry_run if dry_run is not None else self.settings.get("dry_run_mode", False)
+        if is_dry:
+            return self.execute_dry_run_transformation(diag_result, dry_run_dir=dry_run_dir)
         insp = diag_result.get("caratula_inspection", {})
         folder_path = diag_result.get("folder_path")
         caratula_path = insp.get("caratula_path")
@@ -866,40 +1002,53 @@ class FolderOCRService:
         replaceable_pdfs = insp.get("replaceable_pdfs", [])
 
         if not folder_path or not caratula_path or not info_page_num:
-            raise ValueError("La carpeta no cuenta con datos válidos de página con información para reemplazo.")
+            raise ValueError("La carpeta no cuenta con datos válidos de página con información para reemplazo o inserción.")
 
         if not diag_result.get("initial_folder_path"):
             diag_result["initial_folder_path"] = str(folder_path)
             diag_result["initial_folder_name"] = Path(str(folder_path)).name
 
-        res = FileOperations.replace_blank_caratula_in_folder_pdfs(
-            folder_path=folder_path,
-            caratula_path=caratula_path,
-            info_page_num=int(info_page_num),
-            replaceable_pdfs=replaceable_pdfs,
-            db_manager=None,
-            mysql_manager=self.mysql,
-        )
+        c_status = insp.get("status")
+        if c_status == "CARATULA_PAGINA_2_COMPARTIDA":
+            target_pdfs = [Path(it["pdf_path"]) for it in replaceable_pdfs]
+            res = FileOperations.insert_page2_caratula_into_folder_pdfs(
+                folder_path=folder_path,
+                source_pdf=caratula_path,
+                info_page_num=int(info_page_num),
+                target_pdfs=target_pdfs,
+                mysql_manager=self.mysql,
+            )
+            count = res.get("inserted_count", 0)
+            res["replaced_count"] = count
+            msg = f"✔ Página 2 insertada exitosamente en {count} PDF(s) (debajo de la hoja en blanco)."
+        else:
+            res = FileOperations.replace_blank_caratula_in_folder_pdfs(
+                folder_path=folder_path,
+                caratula_path=caratula_path,
+                info_page_num=int(info_page_num),
+                replaceable_pdfs=replaceable_pdfs,
+                db_manager=None,
+                mysql_manager=self.mysql,
+            )
+            count = res.get("replaced_count", 0)
+            msg = f"✔ Hoja de carátula aplicada exitosamente (Pág. {info_page_num}) en {count} PDF(s) (archivos REG intactos)."
 
         diag_result["needs_page_replacement"] = False
         insp["status"] = "OK_CON_INFO"
         insp["pdfs_with_blank_page"] = 0
         insp["replaceable_pdfs"] = []
-        insp["summary_message"] = (
-            f"✔ Hoja de carátula aplicada exitosamente (Pág. {info_page_num}) en {res['replaced_count']} PDF(s) (archivos REG intactos)."
-        )
-        if not diag_result.get("needs_apartar"):
-            if diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_BLANCA":
-                diag_result["veredicto_global"] = "COINCIDE_TOTAL"
-                diag_result["has_discrepancy"] = False
-            elif diag_result.get("veredicto_global") == "REEMPLAZAR_HOJA_Y_RENOMBRAR":
-                diag_result["veredicto_global"] = "DISCREPANCIA"
+        insp["summary_message"] = msg
+
+        if not diag_result.get("needs_apartar") and not diag_result.get("needs_rename"):
+            diag_result["veredicto_global"] = "COINCIDE_TOTAL"
+            diag_result["has_discrepancy"] = False
+            diag_result["subcarpeta_revision"] = ""
 
         actions = list(diag_result.get("applied_actions", []))
-        actions.append(f"🛠 Hoja blanca reemplazada ({res['replaced_count']} PDFs)")
+        actions.append(f"🛠 Carátula aplicada ({count} PDFs)")
         diag_result["applied_actions"] = actions
-        diag_result["last_action"] = f"🛠 Hoja Reemplazada ({res['replaced_count']} PDFs)"
-        diag_result["files_modified_count"] = diag_result.get("files_modified_count", 0) + res["replaced_count"]
+        diag_result["last_action"] = f"🛠 Carátula Aplicada ({count} PDFs)"
+        diag_result["files_modified_count"] = diag_result.get("files_modified_count", 0) + count
         return res
 
     @exclusive_op("Renombrar carpeta")
@@ -908,12 +1057,23 @@ class FolderOCRService:
         diag_result: Dict[str, Any],
         custom_clean_base_code: Optional[str] = None,
         ejecucion_id: Optional[int] = None,
+        dry_run: Optional[bool] = None,
+        dry_run_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Renombra los PDFs internos con el código base hasta el año (SIN _2, _3) y
         renombra la carpeta con el código base (agregando _2, _3 si hay colisión de directorios).
         Siempre garantiza que la posición 1 (Delegación) permanezca intacta.
+        Si 'dry_run' está activo, delega a 'execute_dry_run_transformation'.
         """
+        is_dry = dry_run if dry_run is not None else self.settings.get("dry_run_mode", False)
+        if is_dry:
+            return self.execute_dry_run_transformation(
+                diag_result,
+                dry_run_dir=dry_run_dir,
+                custom_clean_base_code=custom_clean_base_code,
+                ejecucion_id=ejecucion_id,
+            )
         folder_path = diag_result.get("folder_path", "")
         folder_data = diag_result.get("folder_data", {})
         delegacion_fija = folder_data.get("delegacion") or "01"
@@ -964,7 +1124,14 @@ class FolderOCRService:
 
         insp = diag_result.get("caratula_inspection", {})
         old_c_name = insp.get("caratula_filename", "")
-        if old_c_name and old_c_name not in ("SIN CARÁTULA", "NO DETECTADA", "ERROR") and not old_c_name.startswith("[EMBEBIDA]"):
+        if old_c_name and old_c_name.startswith("[PÁG. 2]"):
+            raw_c_name = old_c_name.replace("[PÁG. 2] ", "").strip()
+            new_c_name = FileOperations.build_new_pdf_name(raw_c_name, res["clean_base_code"], old_name)
+            new_c_path = new_folder_p / new_c_name
+            if new_c_path.exists():
+                insp["caratula_filename"] = f"[PÁG. 2] {new_c_name}"
+                insp["caratula_path"] = str(new_c_path)
+        elif old_c_name and old_c_name not in ("SIN CARÁTULA", "NO DETECTADA", "ERROR") and not old_c_name.startswith("[EMBEBIDA]"):
             new_c_name = FileOperations.build_new_pdf_name(old_c_name, res["clean_base_code"], old_name)
             new_c_path = new_folder_p / new_c_name
             if new_c_path.exists():
@@ -1103,15 +1270,25 @@ class FolderOCRService:
 
         return c_res
 
-    def execute_all_pending_corrections(self, diag_result: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_all_pending_corrections(
+        self,
+        diag_result: Dict[str, Any],
+        dry_run: Optional[bool] = None,
+        dry_run_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Ejecuta en un solo paso todas las correcciones físicas pendientes en disco:
         1. Reemplazo o inserción de carátula en PDFs regulares y DUP (excluyendo REG).
         2. Extracción y creación física de carátula embebida si aplica (independiente de renombrado).
         3. Renombrado de carpeta y PDFs regulares y DUP (excluyendo REG).
         4. Re-evaluación del veredicto final.
+        Si 'dry_run' está activo, delega a 'execute_dry_run_transformation' y genera copias seguras.
         Todo queda respaldado en SQLite y backups_rollback/ para Rollback total.
         """
+        is_dry = dry_run if dry_run is not None else self.settings.get("dry_run_mode", False)
+        if is_dry:
+            return self.execute_dry_run_transformation(diag_result, dry_run_dir=dry_run_dir)
+
         applied_now = []
         modified_count = 0
 
@@ -1502,6 +1679,16 @@ class FolderOCRService:
                     "clasificacion": "APARTADOS",
                     "accion": "Directo a Apartados (0 tokens)",
                     "motivo": struct["reason"],
+                })
+            elif struct.get("has_p2_shared_caratula"):
+                items.append({
+                    "carpeta": sf.name,
+                    "ruta": str(sf),
+                    "total_pdfs": struct["total_pdfs"],
+                    "tiene_caratula": False,
+                    "clasificacion": "REQUIERE_IA",
+                    "accion": "🔍 Inspeccionar Pág. 2 con IA + Insertar en PDFs",
+                    "motivo": "Página 1 compartida en blanco; Pág. 2 del primer PDF contiene datos registrales para insertar",
                 })
             elif not struct["has_caratula_file"]:
                 items.append({

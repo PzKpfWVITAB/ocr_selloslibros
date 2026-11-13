@@ -83,6 +83,8 @@ class SettingsManager:
             "mysql_password": os.environ.get("MYSQL_PASSWORD", "") or env_vars.get("MYSQL_PASSWORD", ""),
             "mysql_database": os.environ.get("MYSQL_DATABASE", "") or env_vars.get("MYSQL_DATABASE", "trazabilidad_selloslibros"),
             "mysql_enabled": False if (os.environ.get("MYSQL_ENABLED", "") or env_vars.get("MYSQL_ENABLED", "")).lower() in ["false", "0"] else True,
+            "dry_run_mode": False,
+            "dry_run_output_dir": os.environ.get("DRY_RUN_OUTPUT_DIR", "") or env_vars.get("DRY_RUN_OUTPUT_DIR", ""),
         }
 
         path = cls.get_settings_path()

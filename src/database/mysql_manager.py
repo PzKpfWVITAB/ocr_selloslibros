@@ -193,11 +193,25 @@ class MySQLManager:
                         `ruta_anterior` TEXT NOT NULL,
                         `ruta_nueva` TEXT NOT NULL,
                         `cantidad_paginas` INT NOT NULL DEFAULT 0,
+                        `backup_path` TEXT NULL,
                         `fecha_accion` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         INDEX `idx_ejecucion_arch` (`ejecucion_id`),
                         INDEX `idx_carpeta_uuid_arch` (`carpeta_uuid`)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                 """)
+
+                # Asegurar columna backup_path si la tabla ya existía previamente
+                try:
+                    cur.execute("""
+                        SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS 
+                        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'auditoria_movimientos_archivos' AND COLUMN_NAME = 'backup_path'
+                    """, (self.database,))
+                    res_col = cur.fetchone()
+                    count_val = res_col.get("cnt") if isinstance(res_col, dict) else (res_col[0] if res_col else 0)
+                    if count_val == 0:
+                        cur.execute("ALTER TABLE `auditoria_movimientos_archivos` ADD COLUMN `backup_path` TEXT NULL")
+                except Exception as col_exc:
+                    logger.warning(f"Aviso verificando/migrando columna backup_path en MySQL: {col_exc}")
 
             conn.close()
             return True, f"Base de datos '{self.database}' y las 5 tablas oficiales verificadas/creadas."
@@ -351,6 +365,7 @@ class MySQLManager:
                     INSERT INTO `carpetas_iniciales` (`uuid`, `nombre_original`, `ruta_original`, `total_archivos_inicial`)
                     VALUES (%s, %s, %s, 0)
                 """, (nuevo_uuid, nombre_carpeta, ruta_carpeta))
+                conn.commit()
                 return nuevo_uuid
         finally:
             conn.close()
@@ -383,6 +398,32 @@ class MySQLManager:
         finally:
             conn.close()
 
+    def registrar_movimiento_archivo(
+        self,
+        ejecucion_id: int,
+        carpeta_uuid: str,
+        tipo_accion: str,
+        nombre_anterior: str,
+        nombre_nuevo: str,
+        ruta_anterior: str,
+        ruta_nueva: str,
+        cantidad_paginas: int = 0,
+        backup_path: Optional[str] = None,
+    ):
+        """Registra un movimiento o alteración individual de archivo en `auditoria_movimientos_archivos`."""
+        mov = {
+            "ejecucion_id": ejecucion_id,
+            "carpeta_uuid": carpeta_uuid,
+            "tipo_accion": tipo_accion,
+            "nombre_anterior": nombre_anterior,
+            "nombre_nuevo": nombre_nuevo,
+            "ruta_anterior": ruta_anterior,
+            "ruta_nueva": ruta_nueva,
+            "cantidad_paginas": cantidad_paginas,
+            "backup_path": backup_path,
+        }
+        self.registrar_movimientos_archivos_lote([mov])
+
     def registrar_movimientos_archivos_lote(self, movimientos: List[Dict[str, Any]]):
         """Inserta en lote registros de `auditoria_movimientos_archivos`."""
         if not movimientos:
@@ -400,14 +441,15 @@ class MySQLManager:
                         m["ruta_anterior"],
                         m["ruta_nueva"],
                         m.get("cantidad_paginas", 0),
+                        m.get("backup_path"),
                     )
                     for m in movimientos
                 ]
                 cur.executemany("""
                     INSERT INTO `auditoria_movimientos_archivos` (
                         `ejecucion_id`, `carpeta_uuid`, `tipo_accion`,
-                        `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`, `backup_path`
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, vals)
         finally:
             conn.close()
@@ -574,7 +616,21 @@ class MySQLManager:
                     else:
                         current = Path(ma["ruta_nueva"])
                         target = Path(ma["ruta_anterior"])
+
+                    # Si existe un respaldo binario asociado (ej. inserción de página 2 o reemplazo de hoja)
+                    bkp_str = ma.get("backup_path")
+                    if bkp_str and Path(bkp_str).exists():
+                        try:
+                            if current.exists():
+                                shutil.copy2(bkp_str, str(current))
+                            elif target.exists():
+                                shutil.copy2(bkp_str, str(target))
+                        except Exception as bkp_exc:
+                            errors.append(f"Error restaurando respaldo binario para '{current.name}': {bkp_exc}")
+
                     if str(current) == str(target):
+                        if bkp_str and Path(bkp_str).exists():
+                            files_reverted += 1
                         continue
                     if current.exists():
                         if not target.parent.exists():

@@ -336,7 +336,15 @@ class FileOperations:
                     tmp_file = pdf_file.with_suffix(".tmp_replace.pdf")
                     target_doc = fitz.open(str(pdf_file))
                     try:
-                        if action == "INSERT" or blank_idx < 0:
+                        if action == "INSERT_PAGE_2":
+                            # Insertar carátula en la posición 1 (Pág. 2, directamente debajo de Pág. 1)
+                            target_doc.insert_pdf(
+                                caratula_doc,
+                                from_page=src_page_idx,
+                                to_page=src_page_idx,
+                                start_at=1,
+                            )
+                        elif action == "INSERT" or blank_idx < 0:
                             # Insertar carátula al inicio
                             target_doc.insert_pdf(
                                 caratula_doc,
@@ -406,6 +414,351 @@ class FileOperations:
 
         return {
             "replaced_count": replaced_count,
+            "errors": errors,
+        }
+
+    @classmethod
+    def insert_page2_caratula_into_folder_pdfs(
+        cls,
+        folder_path: Any,
+        source_pdf: Any,
+        info_page_num: int = 2,
+        target_pdfs: Optional[List[Any]] = None,
+        mysql_manager: Optional[Any] = None,
+        ejecucion_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Inserta la página con información de carátula (por defecto Página 2, index 1)
+        del archivo 'source_pdf' como Página 2 (directamente debajo de la Página 1 en blanco)
+        en todos los PDFs de la carpeta que carecen de ella.
+
+        Antes de alterar cualquier archivo:
+        1. Crea un respaldo binario byte-a-byte en 'backups_rollback/' con hash SHA-256 original.
+        2. Inserta la página en la posición 1 (start_at=1) mediante archivo temporal y safe_replace.
+        3. Registra la auditoría en MySQL (auditoria_movimientos_archivos) vinculada al lote y UUID de carpeta.
+        4. Si ocurre cualquier fallo a mitad de lote, ejecuta reversión compensatoria física inmediata
+           restaurando todos los archivos modificados desde sus respaldos.
+        """
+        folder = Path(folder_path)
+        src_file = Path(source_pdf)
+        if not src_file.exists() and (folder / src_file.name).exists():
+            src_file = folder / src_file.name
+
+        if not src_file.exists():
+            raise FileNotFoundError(f"No se encontró el PDF origen para inserción: {src_file}")
+
+        src_page_idx = max(0, int(info_page_num) - 1)
+        backup_dir = cls.get_backup_dir()
+
+        from src.core.caratula_inspector import CaratulaInspector
+
+        if target_pdfs is None:
+            all_pdfs = sorted(
+                [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+                key=lambda x: x.name,
+            )
+            target_pdfs = [
+                f for f in all_pdfs
+                if f.resolve() != src_file.resolve()
+                and not CaratulaInspector.is_irregular_reg_pdf_name(f.name)
+                and "CARATULA" not in f.name.upper()
+            ]
+
+        if not target_pdfs:
+            return {"inserted_count": 0, "errors": []}
+
+        c_uuid = None
+        if mysql_manager and getattr(mysql_manager, "enabled", False):
+            try:
+                c_uuid = mysql_manager.obtener_uuid_por_ruta_o_nombre(str(folder.resolve()), folder.name)
+            except Exception:
+                pass
+
+        source_doc = fitz.open(str(src_file))
+        modified_backups: List[Tuple[Path, Path]] = []
+        errors: List[str] = []
+
+        try:
+            if src_page_idx >= len(source_doc):
+                raise ValueError(
+                    f"La página de carátula ({info_page_num}) excede las páginas del archivo origen ({len(source_doc)})."
+                )
+
+            for item in target_pdfs:
+                pdf_file = Path(item)
+                if not pdf_file.exists() and (folder / pdf_file.name).exists():
+                    pdf_file = folder / pdf_file.name
+
+                if not pdf_file.exists() or pdf_file.resolve() == src_file.resolve():
+                    continue
+
+                if CaratulaInspector.is_irregular_reg_pdf_name(pdf_file.name):
+                    continue
+
+                try:
+                    orig_hash = cls.compute_sha256(pdf_file)
+                    backup_file = backup_dir / f"{orig_hash[:24]}_{pdf_file.name}"
+                    if not backup_file.exists():
+                        shutil.copy2(str(pdf_file), str(backup_file))
+                    backup_path_str = str(backup_file.resolve())
+
+                    tmp_file = pdf_file.with_suffix(".tmp_p2_insert.pdf")
+                    target_doc = fitz.open(str(pdf_file))
+                    try:
+                        # Insertar la página de carátula en la posición 1 (Página 2, debajo de Página 1)
+                        target_doc.insert_pdf(
+                            source_doc,
+                            from_page=src_page_idx,
+                            to_page=src_page_idx,
+                            start_at=1,
+                        )
+                        num_pages = len(target_doc)
+                        target_doc.save(str(tmp_file), deflate=True)
+                    finally:
+                        target_doc.close()
+
+                    safe_replace(tmp_file, pdf_file)
+                    modified_backups.append((pdf_file, backup_file))
+                    new_hash = cls.compute_sha256(pdf_file)
+
+                    if mysql_manager and getattr(mysql_manager, "enabled", False) and c_uuid:
+                        mysql_manager.registrar_movimiento_archivo(
+                            ejecucion_id=ejecucion_id or 0,
+                            carpeta_uuid=c_uuid,
+                            tipo_accion="INSERCION_PAGINA_2_CARATULA",
+                            nombre_anterior=pdf_file.name,
+                            nombre_nuevo=pdf_file.name,
+                            ruta_anterior=str(pdf_file.resolve()),
+                            ruta_nueva=str(pdf_file.resolve()),
+                            cantidad_paginas=num_pages,
+                            backup_path=backup_path_str,
+                        )
+                except Exception as exc:
+                    if "tmp_file" in locals() and tmp_file.exists():
+                        try:
+                            os.remove(str(tmp_file))
+                        except Exception:
+                            pass
+                    logger.error(
+                        f"Fallo durante la inserción en PDF '{pdf_file.name}': {exc}. "
+                        f"Ejecutando reversión compensatoria física...",
+                        exc_info=True,
+                    )
+                    # Reversión compensatoria física
+                    for mod_pdf, bkp in reversed(modified_backups):
+                        try:
+                            if bkp.exists():
+                                shutil.copy2(str(bkp), str(mod_pdf))
+                        except Exception as rb_exc:
+                            logger.error(f"Error restaurando backup en '{mod_pdf}': {rb_exc}")
+                    raise exc
+        finally:
+            source_doc.close()
+
+        return {
+            "inserted_count": len(modified_backups),
+            "errors": errors,
+        }
+
+    @classmethod
+    def execute_folder_dry_run_copy(
+        cls,
+        folder_path: Any,
+        dry_run_dest_dir: Any,
+        clean_base_code: Optional[str] = None,
+        caratula_source_pdf: Optional[Any] = None,
+        info_page_num: int = 2,
+        target_pdfs: Optional[List[Any]] = None,
+        mysql_manager: Optional[Any] = None,
+        ejecucion_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        MODO DRY RUN (Simulación 100% segura):
+        Genera una COPIA COMPLETA transformada de la carpeta y sus PDFs en 'dry_run_dest_dir'.
+        Los archivos y carpetas originales NUNCA se tocan, alteran o renombran.
+
+        En la carpeta de salida (copia):
+        1. Se crea la carpeta con el código base limpio sugerido (ej. '01_03_07_00_00_00_1995').
+        2. Los PDFs internos se guardan con sus nuevos nombres de acuerdo al código base.
+        3. En los PDFs que carecen de la Página 2, se inserta la carátula debajo de la Página 1
+           en la copia resultante (quedando con 2 páginas: Pág 1 blanco, Pág 2 carátula).
+        4. Los archivos que no requieren alteración de páginas se copian intactos con su nuevo nombre.
+        5. Queda registrado en MySQL con tipo 'DRY_RUN_COPIA_TRANSFORMADA'.
+        """
+        orig_folder = Path(folder_path)
+        if not orig_folder.exists() or not orig_folder.is_dir():
+            raise FileNotFoundError(f"Carpeta origen no encontrada: {orig_folder}")
+
+        dest_base = Path(dry_run_dest_dir)
+        dest_base.mkdir(parents=True, exist_ok=True)
+
+        from src.core.caratula_inspector import CaratulaInspector
+
+        # Determinar el nombre base para la copia
+        if clean_base_code and clean_base_code.strip():
+            base_name = clean_base_code.strip()
+        else:
+            base_name = cls.strip_suffix_after_year(orig_folder.name)
+
+        # Resolver colisión si ya existiera una copia previa en el directorio de salida
+        target_folder = cls.resolve_directory_collision(
+            parent_dir=dest_base,
+            base_folder_name=base_name,
+            current_folder_path=None
+        )
+        target_folder.mkdir(parents=True, exist_ok=True)
+
+        # Buscar o verificar el PDF de carátula origen
+        src_c_path: Optional[Path] = None
+        if caratula_source_pdf:
+            cp = Path(caratula_source_pdf)
+            if cp.exists():
+                src_c_path = cp
+            elif (orig_folder / cp.name).exists():
+                src_c_path = orig_folder / cp.name
+
+        all_pdfs = sorted(
+            [f for f in orig_folder.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
+            key=lambda x: x.name
+        )
+
+        if not src_c_path:
+            p2_check = CaratulaInspector.detect_shared_blank_p1_with_p2_info(all_pdfs)
+            if p2_check and p2_check.get("source_pdf"):
+                src_c_path = Path(p2_check["source_pdf"])
+
+        source_doc = None
+        src_page_idx = max(0, int(info_page_num) - 1)
+        if src_c_path and src_c_path.exists():
+            try:
+                source_doc = fitz.open(str(src_c_path))
+            except Exception as e:
+                logger.warning(f"No se pudo abrir PDF de carátula para Dry Run '{src_c_path}': {e}")
+
+        # Determinar qué PDFs requieren inserción de página 2
+        target_set = set()
+        if target_pdfs:
+            for tp in target_pdfs:
+                p = Path(tp)
+                target_set.add(p.name)
+        elif source_doc is not None and src_c_path is not None:
+            for f in all_pdfs:
+                if f.resolve() != src_c_path.resolve() and not CaratulaInspector.is_irregular_reg_pdf_name(f.name):
+                    target_set.add(f.name)
+
+        files_copied = 0
+        files_transformed = 0
+        errors: List[str] = []
+        c_uuid = None
+
+        if mysql_manager and getattr(mysql_manager, "enabled", False):
+            try:
+                c_uuid = mysql_manager.obtener_uuid_por_ruta_o_nombre(str(orig_folder.resolve()), orig_folder.name)
+                mysql_manager.registrar_movimiento_carpeta(
+                    ejecucion_id=ejecucion_id or 0,
+                    carpeta_uuid=c_uuid,
+                    tipo_accion="DRY_RUN_COPIA_CARPETA",
+                    nombre_anterior=orig_folder.name,
+                    nombre_nuevo=target_folder.name,
+                    ruta_anterior=str(orig_folder.resolve()),
+                    ruta_nueva=str(target_folder.resolve()),
+                    cantidad_archivos=len(all_pdfs),
+                )
+            except Exception as my_exc:
+                logger.warning(f"Aviso registrando carpeta Dry Run en MySQL: {my_exc}")
+
+        try:
+            for f in orig_folder.iterdir():
+                if not f.is_file():
+                    continue
+
+                if f.suffix.lower() != ".pdf":
+                    # Archivos no PDF se copian intactos
+                    shutil.copy2(str(f), str(target_folder / f.name))
+                    files_copied += 1
+                    continue
+
+                # Es un PDF: calcular su nuevo nombre renombrado
+                if CaratulaInspector.is_irregular_reg_pdf_name(f.name):
+                    new_pdf_name = f.name
+                else:
+                    new_pdf_name = cls.build_new_pdf_name(f.name, base_name, orig_folder.name)
+
+                dest_pdf_path = target_folder / new_pdf_name
+
+                # ¿Requiere inserción de Página 2?
+                if source_doc is not None and f.name in target_set and src_page_idx < len(source_doc):
+                    try:
+                        # Abrir el original en modo ESTRICTO SOLO LECTURA
+                        doc = fitz.open(str(f))
+                        try:
+                            # Insertar la página de carátula en la posición 1 (Pág. 2)
+                            doc.insert_pdf(
+                                source_doc,
+                                from_page=src_page_idx,
+                                to_page=src_page_idx,
+                                start_at=1,
+                            )
+                            # Guardar directamente en la carpeta de copias (NUNCA toca el original)
+                            doc.save(str(dest_pdf_path), deflate=True)
+                            num_pages = len(doc)
+                        finally:
+                            doc.close()
+
+                        files_transformed += 1
+
+                        if mysql_manager and getattr(mysql_manager, "enabled", False) and c_uuid:
+                            mysql_manager.registrar_movimiento_archivo(
+                                ejecucion_id=ejecucion_id or 0,
+                                carpeta_uuid=c_uuid,
+                                tipo_accion="DRY_RUN_COPIA_TRANSFORMADA",
+                                nombre_anterior=f.name,
+                                nombre_nuevo=new_pdf_name,
+                                ruta_anterior=str(f.resolve()),
+                                ruta_nueva=str(dest_pdf_path.resolve()),
+                                cantidad_paginas=num_pages,
+                                backup_path=None,
+                            )
+                    except Exception as ins_exc:
+                        logger.error(f"Error generando copia transformada de '{f.name}': {ins_exc}", exc_info=True)
+                        errors.append(f"{f.name}: {ins_exc}")
+                        # En caso de error al transformar, copiar el original intacto como respaldo
+                        shutil.copy2(str(f), str(dest_pdf_path))
+                        files_copied += 1
+                else:
+                    # Copia normal con su nuevo nombre
+                    try:
+                        shutil.copy2(str(f), str(dest_pdf_path))
+                        files_copied += 1
+
+                        if mysql_manager and getattr(mysql_manager, "enabled", False) and c_uuid:
+                            mysql_manager.registrar_movimiento_archivo(
+                                ejecucion_id=ejecucion_id or 0,
+                                carpeta_uuid=c_uuid,
+                                tipo_accion="DRY_RUN_COPIA_RENOMBRADA",
+                                nombre_anterior=f.name,
+                                nombre_nuevo=new_pdf_name,
+                                ruta_anterior=str(f.resolve()),
+                                ruta_nueva=str(dest_pdf_path.resolve()),
+                                cantidad_paginas=0,
+                                backup_path=None,
+                            )
+                    except Exception as cp_exc:
+                        logger.error(f"Error copiando '{f.name}' a Dry Run: {cp_exc}", exc_info=True)
+                        errors.append(f"{f.name}: {cp_exc}")
+        finally:
+            if source_doc is not None:
+                source_doc.close()
+
+        return {
+            "success": len(errors) == 0,
+            "dest_folder": target_folder,
+            "dest_folder_name": target_folder.name,
+            "dest_folder_path": str(target_folder),
+            "clean_base_code": base_name,
+            "files_copied": files_copied,
+            "files_transformed": files_transformed,
+            "total_files": files_copied + files_transformed,
             "errors": errors,
         }
 

@@ -374,6 +374,156 @@ class CaratulaInspector:
             return {"kind": "MISSING", "pdf_file": pdf_file, "page_count": page_cnt}
 
     @classmethod
+    def detect_shared_blank_p1_with_p2_info(
+        cls,
+        regular_pdfs: List[Any],
+        sample_count: int = 5,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Detecta el patrón de carpetas donde:
+        1. Los PDFs comparten una Página 1 idéntica en blanco (hoja separadora o plantilla en blanco).
+        2. La Página 2 del primer PDF (primer asiento) contiene información registral (Libro, Año, sellos).
+        3. Identifica cuáles PDFs subsecuentes carecen de esa carátula en su Página 2 para su posterior inserción.
+        """
+        if not regular_pdfs:
+            return None
+
+        clean_pdfs: List[Path] = []
+        for item in regular_pdfs:
+            p = Path(item)
+            if not p.is_file() or p.suffix.lower() != ".pdf":
+                continue
+            if cls.is_irregular_reg_pdf_name(p.name):
+                continue
+            if "CARATULA" in p.name.upper():
+                continue
+            clean_pdfs.append(p)
+
+        clean_pdfs.sort(key=lambda x: x.name)
+        if not clean_pdfs:
+            return None
+
+        # 1. Buscar el PDF origen de carátula en los primeros archivos (típicamente el primer PDF)
+        source_pdf: Optional[Path] = None
+        source_doc_pages = 0
+        p0_signatures: List[str] = []
+        p1_signatures: List[str] = []
+        p0_dhash: Optional[int] = None
+        p1_dhash: Optional[int] = None
+
+        candidates = clean_pdfs[:min(3, len(clean_pdfs))]
+        for cand in candidates:
+            try:
+                cdoc = fitz.open(str(cand))
+            except Exception:
+                continue
+            try:
+                if len(cdoc) >= 2:
+                    p0_has_text, _, p0_gray = cls.analyze_page_has_text(cdoc[0], dpi=100)
+                    p1_has_text, _, p1_gray = cls.analyze_page_has_text(cdoc[1], dpi=100)
+                    if not p0_has_text and p1_has_text:
+                        source_pdf = cand
+                        source_doc_pages = len(cdoc)
+                        p0_md5s, _ = cls._extract_page_image_signatures(cdoc, cdoc[0])
+                        p1_md5s, _ = cls._extract_page_image_signatures(cdoc, cdoc[1])
+                        p0_signatures = p0_md5s
+                        p1_signatures = p1_md5s
+                        p0_dhash = cls._compute_dhash(p0_gray)
+                        p1_dhash = cls._compute_dhash(p1_gray)
+                        break
+            finally:
+                cdoc.close()
+
+        if source_pdf is None or p0_dhash is None or p1_dhash is None:
+            return None
+
+        # 2. Verificar que una muestra de los demás PDFs comparta la Página 1 en blanco
+        other_sample = [p for p in clean_pdfs if p != source_pdf][:sample_count]
+        for op in other_sample:
+            try:
+                odoc = fitz.open(str(op))
+            except Exception:
+                return None
+            try:
+                if len(odoc) == 0:
+                    return None
+                o_has_text, _, o_gray = cls.analyze_page_has_text(odoc[0], dpi=100)
+                if o_has_text:
+                    # Si la primera página tiene texto en los demás PDFs, no es la plantilla en blanco
+                    return None
+                o_md5s, _ = cls._extract_page_image_signatures(odoc, odoc[0])
+                o_dhash = cls._compute_dhash(o_gray)
+                same_blank = (
+                    any(m in o_md5s for m in p0_signatures if m)
+                    or cls._hamming_distance(p0_dhash, o_dhash) <= 16
+                )
+                if not same_blank:
+                    return None
+            finally:
+                odoc.close()
+
+        # 3. Detectar qué PDFs carecen de la página con datos de carátula en su Página 2
+        target_pdfs_to_insert: List[Path] = []
+        pdf_page_counts: Dict[str, int] = {source_pdf.name: source_doc_pages}
+
+        # Obtener texto nativo de la Página 2 del PDF origen para comparar si hay texto digital
+        p1_native_text = ""
+        try:
+            sdoc_temp = fitz.open(str(source_pdf))
+            if len(sdoc_temp) >= 2:
+                p1_native_text = (sdoc_temp[1].get_text("text") or "").strip().upper()
+            sdoc_temp.close()
+        except Exception:
+            pass
+
+        for pf in clean_pdfs:
+            if pf.resolve() == source_pdf.resolve():
+                continue
+            try:
+                doc = fitz.open(str(pf))
+            except Exception:
+                target_pdfs_to_insert.append(pf)
+                continue
+            try:
+                cnt = len(doc)
+                pdf_page_counts[pf.name] = cnt
+                if cnt < 2:
+                    target_pdfs_to_insert.append(pf)
+                else:
+                    op2_native_text = (doc[1].get_text("text") or "").strip().upper()
+                    op2_has_text, _, op2_gray = cls.analyze_page_has_text(doc[1], dpi=100)
+                    op2_md5s, _ = cls._extract_page_image_signatures(doc, doc[1])
+
+                    has_caratula = False
+                    if p1_signatures and op2_md5s:
+                        # Para PDFs escaneados: coincidencia exacta de stream de imagen
+                        has_caratula = any(m in op2_md5s for m in p1_signatures if m)
+                    elif p1_native_text and op2_native_text:
+                        # Para PDFs digitales: coincidencia de texto
+                        has_caratula = (p1_native_text == op2_native_text or p1_native_text in op2_native_text)
+                    elif op2_has_text:
+                        op2_dhash = cls._compute_dhash(op2_gray)
+                        has_caratula = cls._hamming_distance(p1_dhash, op2_dhash) <= 8
+
+                    if not has_caratula:
+                        target_pdfs_to_insert.append(pf)
+            finally:
+                doc.close()
+
+        return {
+            "status": "CARATULA_PAGINA_2_COMPARTIDA",
+            "source_pdf": source_pdf,
+            "source_pdf_name": source_pdf.name,
+            "source_total_pages": source_doc_pages,
+            "info_page_num": 2,
+            "shared_blank_p1": True,
+            "total_regular_pdfs": len(clean_pdfs),
+            "target_pdfs_to_insert": target_pdfs_to_insert,
+            "pdf_page_counts": pdf_page_counts,
+            "total_pages_in_folder": sum(pdf_page_counts.values()),
+        }
+
+    @classmethod
     def detect_embedded_caratula_sample(
         cls,
         regular_pdfs: List[Path],
@@ -466,7 +616,54 @@ class CaratulaInspector:
             caratula_pdf = cls.auto_detect_caratula(folder)
 
         if caratula_pdf is None:
-            # Intentar detectar carátula embebida en la primera página de los archivos regulares
+            # 1. Regla: ¿Página 1 compartida en blanco y datos registrales en Página 2 del primer PDF?
+            p2_shared = cls.detect_shared_blank_p1_with_p2_info(all_pdfs)
+            if p2_shared is not None:
+                src_pdf = p2_shared["source_pdf"]
+                targets = p2_shared["target_pdfs_to_insert"]
+                replaceable_pdfs = [
+                    {
+                        "pdf_path": str(p),
+                        "pdf_name": p.name,
+                        "action": "INSERT_PAGE_2",
+                        "blank_page_index": 1,
+                        "insert_at": 1,
+                        "source_pdf_path": str(src_pdf),
+                        "source_page_num": 2,
+                    }
+                    for p in targets
+                ]
+                msg = (
+                    f"Patrón detectado: Página 1 compartida en blanco y datos registrales en Página 2 de "
+                    f"'{src_pdf.name}'. Requiere inserción de Página 2 en {len(targets)} PDF(s) y cotejo con IA."
+                )
+                return {
+                    "status": "CARATULA_PAGINA_2_COMPARTIDA",
+                    "caratula_path": str(src_pdf),
+                    "caratula_filename": f"[PÁG. 2] {src_pdf.name}",
+                    "caratula_total_pages": p2_shared.get("source_total_pages", 2),
+                    "info_page_num": 2,
+                    "info_pages": [2],
+                    "blank_pages": [1],
+                    "caratula_pages": [
+                        {"page_num": 1, "has_text": False},
+                        {"page_num": 2, "has_text": True},
+                    ],
+                    "all_pdfs_have_caratula": len(targets) == 0,
+                    "total_regular_pdfs": p2_shared["total_regular_pdfs"],
+                    "total_pages_in_folder": p2_shared["total_pages_in_folder"],
+                    "pdf_page_counts": p2_shared["pdf_page_counts"],
+                    "pdfs_with_info_page": p2_shared["total_regular_pdfs"] - len(targets),
+                    "pdfs_with_blank_page": p2_shared["total_regular_pdfs"],
+                    "pdfs_missing_caratula": [p.name for p in targets],
+                    "replaceable_pdfs": replaceable_pdfs,
+                    "dup_pdfs": dup_pdfs,
+                    "irregular_pdfs": irregular_pdfs,
+                    "shared_p2_info": p2_shared,
+                    "summary_message": msg,
+                }
+
+            # 2. Intentar detectar carátula embebida en la primera página de los archivos regulares
             embedded_caratula = cls.detect_embedded_caratula_sample(all_pdfs, sample_count=3)
             if embedded_caratula is not None:
                 return {

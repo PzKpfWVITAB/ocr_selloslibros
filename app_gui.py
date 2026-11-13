@@ -2888,9 +2888,40 @@ class OCRLibrosApp(tk.Tk):
             command=self._refresh_master_table
         ).pack(side=tk.RIGHT)
 
+        # Fila 3: Modo Simulación / Dry Run (Copias seguras en directorio alterno)
+        row_dry = ttk.Frame(paths_frame)
+        row_dry.pack(fill=tk.X, pady=(4, 0))
+
+        self.dry_run_mode_var = tk.BooleanVar(value=bool(self.service.settings.get("dry_run_mode", False)))
+        ttk.Checkbutton(
+            row_dry,
+            text="🧪 Modo Dry Run (Copias seguras sin alterar originales)",
+            variable=self.dry_run_mode_var,
+            command=self._on_dry_run_mode_toggle
+        ).pack(side=tk.LEFT, padx=(0, 16))
+
+        ttk.Label(row_dry, text="Ruta Salida Dry Run (Copias):", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        initial_dry_run = self.service.settings.get("dry_run_output_dir", "")
+        self.dry_run_output_var = tk.StringVar(value=initial_dry_run)
+        self.entry_dry_run = ttk.Entry(row_dry, textvariable=self.dry_run_output_var, font=("Consolas", 9))
+        self.entry_dry_run.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ttk.Button(row_dry, text="Elegir Dir. Dry Run...", command=self.browse_dry_run_dir).pack(side=tk.LEFT)
+
         # 3. Barra de Estado y Progreso
         self.banner_frame = tk.Frame(main_frame, bg="#f1f5f9", padx=10, pady=6, relief=tk.GROOVE, bd=1)
         self.banner_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.lbl_dry_badge = tk.Label(
+            self.banner_frame,
+            text="",
+            font=("Segoe UI", 9, "bold"),
+            bg="#fef3c7",
+            fg="#92400e",
+            padx=6,
+            pady=3,
+            relief=tk.SOLID,
+            bd=1
+        )
 
         top_status_frame = tk.Frame(self.banner_frame, bg="#f1f5f9")
         top_status_frame.pack(fill=tk.X)
@@ -2982,6 +3013,12 @@ class OCRLibrosApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_s2,
+            text="🧪 Probar en Dry Run (Copia)...",
+            style="Action.TButton",
+            command=self.dry_run_single_folder
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_s2,
             text="✏️ Renombrar Carpeta y PDFs",
             style="Primary.TButton",
             command=self.rename_selected_folder
@@ -3065,6 +3102,11 @@ class OCRLibrosApp(tk.Tk):
             text="✏️ 2E. Corregir Discrepancias",
             style="Primary.TButton",
             command=self.run_batch_rename_discrepancies_async
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_b2,
+            text="🧪 Dry Run Masivo (Copias)",
+            command=self.batch_dry_run_pending
         ).pack(side=tk.LEFT)
 
         # Fila 3: Paso 3 (Traslados Finales)
@@ -3307,6 +3349,9 @@ class OCRLibrosApp(tk.Tk):
         self.txt_evidence.configure(yscrollcommand=scrollbar_ev.set)
         self.txt_evidence.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar_ev.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Inicializar estado visual del banner Dry Run
+        self._update_dry_run_badge()
 
     # =========================================================================
     # VENTANAS AUXILIARES Y CONFIGURACIÓN
@@ -4179,6 +4224,37 @@ class OCRLibrosApp(tk.Tk):
             cfg["validados_dir"] = folder
             SettingsManager.save(cfg)
 
+    def browse_dry_run_dir(self):
+        folder = filedialog.askdirectory(
+            title="Seleccionar directorio de salida para copias de Simulación Dry Run"
+        )
+        if folder:
+            self.dry_run_output_var.set(folder)
+            cfg = self.service.reload_settings()
+            cfg["dry_run_output_dir"] = folder
+            SettingsManager.save(cfg)
+            self._update_dry_run_badge()
+
+    def _on_dry_run_mode_toggle(self):
+        is_active = bool(self.dry_run_mode_var.get())
+        cfg = self.service.reload_settings()
+        cfg["dry_run_mode"] = is_active
+        SettingsManager.save(cfg)
+        self._update_dry_run_badge()
+
+    def _update_dry_run_badge(self):
+        if not hasattr(self, "lbl_dry_badge"):
+            return
+        is_active = bool(self.dry_run_mode_var.get())
+        if is_active:
+            out_dir = self.dry_run_output_var.get().strip() or "NO CONFIGURADO (Elige una ruta)"
+            self.lbl_dry_badge.config(
+                text=f"🧪 MODO DRY RUN ACTIVO: Los cambios se guardarán como COPIAS en: '{out_dir}' (Archivos originales 100% intactos)"
+            )
+            self.lbl_dry_badge.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        else:
+            self.lbl_dry_badge.pack_forget()
+
     def _resolve_valid_subfolders(self, folder_path: str) -> List[Path]:
         subfolders = self.service.get_valid_subfolders(folder_path)
         if not subfolders:
@@ -4439,6 +4515,15 @@ class OCRLibrosApp(tk.Tk):
             elif v_global == "REEMPLAZAR_HOJA_Y_RENOMBRAR":
                 tag = "diff"
                 v_label = "🛠+✏️ REEMPLAZAR Y RENOMBRAR"
+            elif v_global == "REQUIERE_RENOMBRE_E_INSERCION_P2":
+                tag = "diff"
+                v_label = "🛠+✏️ INSERTAR PÁG. 2 Y RENOMBRAR"
+            elif v_global == "REQUIERE_INSERCION_PAGINA_2":
+                tag = "replace"
+                v_label = "🛠 INSERTAR PÁG. 2 (CARÁTULA)"
+            elif v_global == "REQUIERE_RENOMBRE":
+                tag = "zeros"
+                v_label = "✏️ RENOMBRAR CON DATOS IA"
             elif "CEROS" in v_global:
                 tag = "zeros"
                 v_label = "★ RELLENAR CEROS / RENOMBRAR"
@@ -5214,6 +5299,10 @@ class OCRLibrosApp(tk.Tk):
             messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla.")
             return
 
+        if self.dry_run_mode_var.get():
+            self.dry_run_single_folder()
+            return
+
         if not res.get("needs_page_replacement") and not res.get("needs_rename"):
             messagebox.showinfo(
                 "Sin Correcciones Pendientes",
@@ -5246,6 +5335,72 @@ class OCRLibrosApp(tk.Tk):
             )
         except Exception as exc:
             messagebox.showerror("Error al aplicar correcciones", str(exc))
+
+    def dry_run_single_folder(self):
+        res = self._get_selected_result()
+        if not res:
+            messagebox.showwarning("Atención", "Selecciona primero una carpeta de la tabla.", parent=self)
+            return
+
+        out_dir = self.dry_run_output_var.get().strip()
+        if not out_dir:
+            messagebox.showwarning(
+                "Directorio Dry Run Requerido",
+                "Por favor selecciona la 'Ruta Salida Dry Run (Copias)' en la barra superior antes de ejecutar la simulación.",
+                parent=self
+            )
+            self.browse_dry_run_dir()
+            out_dir = self.dry_run_output_var.get().strip()
+            if not out_dir:
+                return
+
+        folder_name = Path(res.get("folder_path", "")).name
+        code = self.suggested_code_var.get().strip() or res.get("codigo_base_sugerido", "")
+
+        if not messagebox.askyesno(
+            "Confirmar Simulación Dry Run (Copia Segura)",
+            f"Se creará una COPIA transformada en el directorio de Dry Run:\n\n"
+            f"• Carpeta origen: '{folder_name}'\n"
+            f"• Ruta salida: '{out_dir}'\n"
+            f"• Código base objetivo: '{code or 'Automático'}'\n\n"
+            f"🔒 GARANTÍA DE SEGURIDAD:\n"
+            f"Los archivos y carpetas originales NO sufrirán ninguna modificación.\n\n"
+            f"¿Deseas generar la copia de prueba ahora?",
+            parent=self
+        ):
+            return
+
+        def _work():
+            return self.service.execute_dry_run_transformation(
+                diag_result=res,
+                dry_run_dir=out_dir,
+                custom_clean_base_code=code or None,
+            )
+
+        def _done(r, err):
+            if err:
+                messagebox.showerror("Error en Dry Run", f"Error durante la simulación Dry Run:\n{err}", parent=self)
+                return
+            self._refresh_master_table()
+            self._render_single_folder_detail(res)
+            self._refresh_header_badge()
+            self.refresh_execution_history()
+
+            dest_folder = r.get("dest_folder_name", "")
+            n_trans = r.get("files_transformed", 0)
+            n_copied = r.get("files_copied", 0)
+            messagebox.showinfo(
+                "Simulación Dry Run Concluida",
+                f"✅ Copia de prueba generada con éxito:\n\n"
+                f"• Carpeta copia: {dest_folder}\n"
+                f"• PDFs transformados (Pág. 2 insertada / renombrados): {n_trans}\n"
+                f"• PDFs/archivos copiados intactos: {n_copied}\n"
+                f"• Ubicación: {r.get('dest_folder_path')}\n\n"
+                f"🔒 Los archivos originales en el origen permanecen 100% inalterados.",
+                parent=self
+            )
+
+        self._run_exclusive_in_thread(f"Dry Run Copia: {folder_name}", _work, _done)
 
     def apartar_selected_folder(self):
         res = self._get_selected_result()
@@ -5480,6 +5635,10 @@ class OCRLibrosApp(tk.Tk):
         messagebox.showinfo(op_title, summary_msg)
 
     def batch_apply_all_corrections(self):
+        if self.dry_run_mode_var.get():
+            self.batch_dry_run_pending()
+            return
+
         targets = [
             r for r in self.all_folder_items
             if r.get("needs_page_replacement", False)
@@ -5509,6 +5668,51 @@ class OCRLibrosApp(tk.Tk):
             op_title="Aplicar Correcciones Físicas",
             targets=targets,
             worker_func=lambda r: self.service.execute_all_pending_corrections(r)
+        )
+
+    def batch_dry_run_pending(self):
+        targets = [
+            r for r in self.all_folder_items
+            if r.get("needs_page_replacement", False)
+            or r.get("needs_rename", False)
+            or r.get("embedded_caratula_to_create")
+        ]
+        if not targets:
+            messagebox.showinfo(
+                "Sin Carpetas Pendientes",
+                "No hay carpetas con transformaciones o renombres pendientes para simular en Dry Run.",
+                parent=self
+            )
+            return
+
+        out_dir = self.dry_run_output_var.get().strip()
+        if not out_dir:
+            messagebox.showwarning(
+                "Directorio Dry Run Requerido",
+                "Por favor selecciona la 'Ruta Salida Dry Run (Copias)' en la barra superior antes de ejecutar el Dry Run masivo.",
+                parent=self
+            )
+            self.browse_dry_run_dir()
+            out_dir = self.dry_run_output_var.get().strip()
+            if not out_dir:
+                return
+
+        if not messagebox.askyesno(
+            "Confirmar Dry Run Masivo (Copias Seguras)",
+            f"Se crearán COPIAS transformadas para {len(targets)} carpeta(s) en:\n'{out_dir}'\n\n"
+            f"🔒 GARANTÍA DE SEGURIDAD:\n"
+            f"• Los archivos originales y carpetas en el origen NO serán modificados.\n"
+            f"• Cada carpeta generará una copia limpia con la Pág. 2 insertada (si aplica) y renombres aplicados.\n"
+            f"• Se registrará el lote en MySQL como DRY_RUN_TRANSFORMACION_COPIA.\n\n"
+            f"¿Deseas iniciar el Dry Run masivo?",
+            parent=self
+        ):
+            return
+
+        self._run_async_batch_operation(
+            op_title="Simulación Dry Run Masiva",
+            targets=targets,
+            worker_func=lambda r: self.service.execute_dry_run_transformation(r, dry_run_dir=out_dir)
         )
 
     def batch_replace_all_blank_pages(self):
