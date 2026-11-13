@@ -4898,14 +4898,31 @@ class OCRLibrosApp(tk.Tk):
             errores = res.get("errores", [])
             ejec_id = res.get("ejecucion_id")
 
-            # Actualizar estado de ubicación para las tablas
+            # Actualizar estado de ubicación y rutas para las tablas
+            moved_map = res.get("moved_map", {})
             root_p = Path(self.path_var.get().strip()).resolve() if self.path_var.get().strip() else None
-            for r in selected_results:
-                curr_p = Path(r.get("folder_path", "")).resolve()
-                if root_p and curr_p.parent == root_p:
-                    r["moved_destination_type"] = ""
-                else:
-                    r["moved_destination_type"] = "REUBICADA"
+
+            for r in self.all_folder_items:
+                orig_fp = r.get("folder_path", "")
+                if orig_fp in moved_map:
+                    new_fp = moved_map[orig_fp]
+                    r["folder_path"] = new_fp
+                    curr_p = Path(new_fp).resolve()
+
+                    if root_p and curr_p.parent == root_p:
+                        r["moved_destination_type"] = ""
+                    else:
+                        r["moved_destination_type"] = "REUBICADA"
+
+                    insp = r.get("caratula_inspection", {})
+                    if insp and insp.get("caratula_path"):
+                        c_p = Path(insp["caratula_path"])
+                        insp["caratula_path"] = str((curr_p / c_p.name).resolve())
+
+                    actions = list(r.get("applied_actions", []))
+                    actions.append(f"🚚 Reubicada a {dest_dir.name}/{curr_p.name}")
+                    r["applied_actions"] = actions
+                    r["last_action"] = f"🚚 Reubicada a {dest_dir.name}"
 
             self._refresh_master_table()
             self._refresh_header_badge()

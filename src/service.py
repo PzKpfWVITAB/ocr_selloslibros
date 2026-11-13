@@ -72,6 +72,7 @@ class FolderOCRService:
         self.mysql = MySQLManager(self.settings)
         self._op_lock = threading.RLock()
         self.current_operation: Optional[str] = None
+        self.results_data: List[Dict[str, Any]] = []
 
     def reload_settings(self) -> Dict[str, Any]:
         self.settings = SettingsManager.load()
@@ -2032,6 +2033,7 @@ class FolderOCRService:
         movidas = 0
         archivos_movidos = 0
         errors: List[str] = []
+        moved_map: Dict[str, str] = {}
         total = len(to_move)
 
         for idx, sf in enumerate(to_move, start=1):
@@ -2103,20 +2105,23 @@ class FolderOCRService:
                 errors.append(f"{fname}: Error al registrar en MySQL ({log_exc}). Se revirtió el traslado físico.")
                 continue
 
-            # Actualizar en memoria self.results_data
-            for res_item in self.results_data:
-                curr_p_str = res_item.get("folder_path", "")
-                if curr_p_str and Path(curr_p_str).resolve() == sf:
-                    res_item["folder_path"] = dest_str
-                    insp = res_item.get("caratula_inspection", {})
-                    if insp and insp.get("caratula_path"):
-                        c_p = Path(insp["caratula_path"])
-                        if c_p.parent.resolve() == sf:
-                            insp["caratula_path"] = str((target / c_p.name).resolve())
-                    actions = list(res_item.get("applied_actions", []))
-                    actions.append(f"🚚 Reubicada a {dest_path.name}/{fname}")
-                    res_item["applied_actions"] = actions
-                    res_item["last_action"] = f"🚚 Reubicada a {dest_path.name}"
+            moved_map[old_str] = dest_str
+
+            # Actualizar en memoria self.results_data si está presente
+            if hasattr(self, "results_data") and isinstance(self.results_data, list):
+                for res_item in self.results_data:
+                    curr_p_str = res_item.get("folder_path", "")
+                    if curr_p_str and Path(curr_p_str).resolve() == sf:
+                        res_item["folder_path"] = dest_str
+                        insp = res_item.get("caratula_inspection", {})
+                        if insp and insp.get("caratula_path"):
+                            c_p = Path(insp["caratula_path"])
+                            if c_p.parent.resolve() == sf:
+                                insp["caratula_path"] = str((target / c_p.name).resolve())
+                        actions = list(res_item.get("applied_actions", []))
+                        actions.append(f"🚚 Reubicada a {dest_path.name}/{fname}")
+                        res_item["applied_actions"] = actions
+                        res_item["last_action"] = f"🚚 Reubicada a {dest_path.name}"
 
             movidas += 1
             archivos_movidos += n_pdfs
@@ -2142,6 +2147,7 @@ class FolderOCRService:
             "omitidas_conflicto": omitidas_conflicto,
             "errores": errors,
             "destino": str(dest_path),
+            "moved_map": moved_map,
         }
 
     def obtener_historial_ejecuciones(self) -> List[Dict[str, Any]]:
