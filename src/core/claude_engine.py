@@ -66,7 +66,9 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
        - ESTÁ ESTRICTAMENTE PROHIBIDO usar únicamente "FRACCIONAMIENTOS_Y_COLONIAS" o "COLONIAS".
        - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_3_DE_MAYO").
        - REGLA CRÍTICA DE LIMPIEZA: NUNCA incluyas conectores como "DEL", "DE", "PARA EL AÑO" ni el año dentro de "fraccionamiento" (ej. si el documento dice "FRACCIONAMIENTO 3 DE MAYO DEL 2004" o "FRACCIONAMIENTO 5 DE MAYO DEL 2005", el fraccionamiento es "FRACCIONAMIENTO_3_DE_MAYO" o "FRACCIONAMIENTO_5_DE_MAYO", NUNCA "FRACCIONAMIENTO_3_DE_MAYO_DEL" ni "FRACCIONAMIENTO_3_DE_MAYO_DEL_2004").
-       - El formato OBLIGATORIO es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
+       - NUNCA inventes o uses palabras explicativas como "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_GENERAL" o "FRACCIONAMIENTO_ESPECIFICO".
+       - Si el documento dice únicamente "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS" o "FRACCIONAMIENTOS Y COLONIAS" y NO menciona explícitamente el nombre de un fraccionamiento, colonia o predio específico, DEBES proponer obligatoriamente "FRACCIONAMIENTOS_Y_COLONIAS".
+       - El formato OBLIGATORIO para fraccionamientos específicos es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
        - ÚNICAMENTE debes usar "FRACCIONAMIENTOS_Y_COLONIAS" si en TODO el documento no existe ninguna mención de un fraccionamiento, colonia o predio en particular.
    - Casos y Formatos:
      a) Cuando el libro está dedicado a un Fraccionamiento, Colonia o Predio específico:
@@ -559,19 +561,63 @@ class ClaudeVisionEngine:
             return TextNormalizer.normalize_section(val)
         return None
 
+    DISALLOWED_FRACCIONAMIENTO_NAMES = {
+        "Y_COLONIAS", "O_COLONIAS", "COLONIAS", "COLONIA", "FRACCIONAMIENTOS", "FRACCIONAMIENTO",
+        "FRACCION", "FRACCIONES", "DE", "DEL", "LOS", "LAS", "LA", "EL", "EN", "AL", "UN", "UNA",
+        "DETECTADO", "DETECTADA", "DETECTADOS", "DETECTADAS",
+        "ENCONTRADO", "ENCONTRADA", "ENCONTRADOS", "ENCONTRADAS",
+        "MENCIONADO", "MENCIONADA", "MENCIONADOS", "MENCIONADAS",
+        "OBSERVADO", "OBSERVADA", "OBSERVADOS", "OBSERVADAS",
+        "PROPUESTO", "PROPUESTA", "PROPUESTOS", "PROPUESTAS",
+        "SUGERIDO", "SUGERIDA", "SUGERIDOS", "SUGERIDAS",
+        "IDENTIFICADO", "IDENTIFICADA", "IDENTIFICADOS", "IDENTIFICADAS",
+        "ESPECIFICADO", "ESPECIFICADA", "ESPECIFICADOS", "ESPECIFICADAS",
+        "ESPECIFICO", "ESPECIFICA", "ESPECIFICOS", "ESPECIFICAS",
+        "GENERAL", "GENERALES", "GENERICO", "GENERICA", "GENERICOS", "GENERICAS",
+        "INDICADO", "INDICADA", "INDICADOS", "INDICADAS",
+        "REGISTRADO", "REGISTRADA", "REGISTRADOS", "REGISTRADAS",
+        "DESCONOCIDO", "DESCONOCIDA", "NO_ESPECIFICADO", "SIN_ESPECIFICAR",
+        "RELATIVO", "RELATIVOS", "RELATIVA", "RELATIVAS",
+        "INDICE", "REGISTRO", "OFICIAL", "AUXILIAR", "URBANO", "URBANOS", "RURAL", "RURALES",
+        "TERRENO", "TERRENOS", "PREDIO", "PREDIOS", "LOTE", "LOTES",
+        "NULL", "NONE", "NINGUNO", "NINGUNA", "NO", "SIN",
+    }
+
     @classmethod
     def extract_specific_fraccionamiento(cls, text: str) -> Optional[str]:
         if not text:
             return None
-        normalized = TextNormalizer.strip_accents(str(text).upper())
+        # Limpiar prefijos de explicaciones o etiquetas de IA en evidencias
+        # (ej. 'Fraccionamiento detectado:', 'Fraccionamiento mencionado:') para evitar falsos positivos
+        clean_text = re.sub(
+            r'\bFRACCIONAMIENTOS?\s+(?:DETECTAD[OA]S?|ENCONTRAD[OA]S?|MENCIONAD[OA]S?|OBSERVAD[OA]S?|PROPUEST[OA]S?|SUGERID[OA]S?|IDENTIFICAD[OA]S?|ESPECIFICAD[OA]S?)\s*:\s*',
+            ' ',
+            str(text),
+            flags=re.IGNORECASE
+        )
+        normalized = TextNormalizer.strip_accents(clean_text.upper())
         pat = re.compile(
-            r'\b(?:DEL\s+|PARA\s+EL\s+|EN\s+EL\s+)?(?:FRACCIONAMIENTO|FRACCION\s+D[EC]|COLONIA|PREDIO\s+DENOMINADO|PREDIO)\s+(?!Y\s+COLONIAS\b|O\s+COLONIAS\b|URBANOS?\b)([A-Z0-9\s,\'\"\.\-_]{3,60})',
+            r'\b(?:DEL\s+|PARA\s+EL\s+|EN\s+EL\s+)?(?:FRACCIONAMIENTO|FRACCION\s+D[EC]|COLONIA|PREDIO\s+DENOMINADO|PREDIO)\s+'
+            r'(?!Y\s+COLONIAS\b|O\s+COLONIAS\b|URBANOS?\b|RURALES?\b|DETECTAD[OA]S?\b|ENCONTRAD[OA]S?\b|MENCIONAD[OA]S?\b|'
+            r'OBSERVAD[OA]S?\b|PROPUEST[OA]S?\b|SUGERID[OA]S?\b|IDENTIFICAD[OA]S?\b|GENERAL(?:ES)?\b|ESPECIFIC[OA]S?\b|'
+            r'ESPECIFICAD[OA]S?\b|INDICAD[OA]S?\b|REGISTRAD[OA]S?\b|NO\s+|SIN\s+)'
+            r'([A-Z0-9\s,\'\"\.\-_]{3,60})',
             re.IGNORECASE
         )
         for m in pat.finditer(normalized):
             candidate = cls.clean_fraccionamiento_name(m.group(1))
-            if len(candidate) >= 3 and candidate not in ['Y_COLONIAS', 'COLONIAS', 'DE', 'DEL', 'LOS', 'LAS', 'LA', 'EL', 'GENERAL']:
-                return f"FRACCIONAMIENTO_{candidate}"
+            if not candidate or len(candidate) < 3:
+                continue
+            if candidate in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+                continue
+            # Si el candidato empieza con un metatoken no permitido
+            first_tok = candidate.split("_")[0]
+            if first_tok in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+                sub_cand = "_".join(candidate.split("_")[1:]).strip("_")
+                if len(sub_cand) < 3 or sub_cand in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+                    continue
+                candidate = sub_cand
+            return f"FRACCIONAMIENTO_{candidate}"
         return None
 
     @classmethod
@@ -582,10 +628,20 @@ class ClaudeVisionEngine:
         if s in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "00", "0", "NULL", "NONE"]:
             return s
         if s.startswith("FRACCIONAMIENTO_"):
-            s = s[16:]
+            s_body = s[16:]
         elif s.startswith("FRACCION_"):
-            s = s[9:]
-        cleaned_body = cls.clean_fraccionamiento_name(s)
+            s_body = s[9:]
+        else:
+            s_body = s
+        cleaned_body = cls.clean_fraccionamiento_name(s_body)
+        if not cleaned_body or cleaned_body in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+            return "FRACCIONAMIENTOS_Y_COLONIAS"
+        first_tok = cleaned_body.split("_")[0]
+        if first_tok in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+            sub_body = "_".join(cleaned_body.split("_")[1:]).strip("_")
+            if not sub_body or sub_body in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+                return "FRACCIONAMIENTOS_Y_COLONIAS"
+            cleaned_body = sub_body
         return f"FRACCIONAMIENTO_{cleaned_body}"
 
     @staticmethod
@@ -769,6 +825,16 @@ class ClaudeVisionEngine:
 
         # --- REGLA 2: Prioridad de Fraccionamientos Específicos sobre genéricos ---
         curr_fracc = repaired.get("fraccionamiento")
+        # Reparar valores espurios cacheados como FRACCIONAMIENTO_DETECTADO a su valor genérico real
+        if curr_fracc in [
+            "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_MENCIONADO",
+            "FRACCIONAMIENTO_PROPUESTO", "FRACCIONAMIENTO_SUGERIDO", "FRACCIONAMIENTO_ESPECIFICO",
+            "FRACCIONAMIENTO_GENERAL"
+        ]:
+            curr_fracc = "FRACCIONAMIENTOS_Y_COLONIAS"
+            repaired["fraccionamiento"] = "FRACCIONAMIENTOS_Y_COLONIAS"
+            changed = True
+
         all_text = f"{transcripcion_literal} " + " ".join(
             str(e) for e in evidencias if not cls._is_negative_or_absence_line(str(e))
         )

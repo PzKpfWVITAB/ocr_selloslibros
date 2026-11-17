@@ -261,6 +261,78 @@ class TestFraccionamientoNamingPriority(unittest.TestCase):
         self.assertEqual(repaired["libro"], 247)
         self.assertEqual(repaired["tomo"], "AUXILIAR")
 
+    def test_generic_fraccionamientos_y_colonias_never_becomes_fraccionamiento_detectado(self):
+        # Caso reportado por el usuario: Libro 107 Auxiliar de Fraccionamientos y Colonias de 1993
+        # La explicación de IA 'Fraccionamiento detectado: FRACCIONAMIENTOS Y COLONIAS' jamás debe
+        # extraer 'DETECTADO' como nombre de fraccionamiento. Debe proponer FRACCIONAMIENTOS_Y_COLONIAS.
+        raw_json = """
+        {
+            "transcripcion_literal": "AUTORIZA EL PRESENTE LIBRO NUMERO 107, AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS, DEL REGISTRO PUBLICO DE LA PROPIEDAD Y DE COMERCIO... PARA EL AÑO DE 1993",
+            "datos_estructurados": {
+                "seccion": null,
+                "libro": 107,
+                "tomo": "AUXILIAR",
+                "volumen": null,
+                "fraccionamiento": "FRACCIONAMIENTOS_Y_COLONIAS",
+                "anio": 1993,
+                "es_auxiliar": true
+            },
+            "comentarios_ia": "Libro Auxiliar de Fraccionamientos y Colonias sin nombre de fraccionamiento particular.",
+            "texto_descriptivo": "Libro 107 Auxiliar de Fraccionamientos y Colonias correspondiente a 1993.",
+            "evidencias": [
+                "Libro detectado: 'LIBRO NUMERO 107' -> libro=107",
+                "Categoría Auxiliar: 'AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS' -> tomo='AUXILIAR'",
+                "Fraccionamiento detectado: 'FRACCIONAMIENTOS Y COLONIAS'",
+                "Año detectado: '1993'"
+            ]
+        }
+        """
+        parsed = ClaudeVisionEngine._parse_claude_json(raw_json)
+        self.assertNotEqual(parsed["fraccionamiento"], "FRACCIONAMIENTO_DETECTADO")
+        self.assertEqual(parsed["fraccionamiento"], "FRACCIONAMIENTOS_Y_COLONIAS")
+        self.assertEqual(parsed["libro"], 107)
+        self.assertEqual(parsed["tomo"], "AUXILIAR")
+        self.assertEqual(parsed["anio"], 1993)
+
+        # Proponer código
+        sugerido = FileOperations.build_clean_folder_code(
+            delegacion="01",
+            seccion=parsed["seccion"],
+            libro=parsed["libro"],
+            tomo=parsed["tomo"],
+            volumen=parsed["volumen"],
+            fraccionamiento=parsed["fraccionamiento"],
+            anio=parsed["anio"]
+        )
+        self.assertEqual(sugerido, "01_00_107_AUXILIAR_00_FRACCIONAMIENTOS_Y_COLONIAS_1993")
+
+    def test_normalize_and_sanitize_repairs_fraccionamiento_detectado(self):
+        # normalize_fraccionamiento_label debe mapear FRACCIONAMIENTO_DETECTADO a FRACCIONAMIENTOS_Y_COLONIAS
+        self.assertEqual(
+            ClaudeVisionEngine.normalize_fraccionamiento_label("FRACCIONAMIENTO_DETECTADO"),
+            "FRACCIONAMIENTOS_Y_COLONIAS"
+        )
+        self.assertEqual(
+            ClaudeVisionEngine.normalize_fraccionamiento_label("DETECTADO"),
+            "FRACCIONAMIENTOS_Y_COLONIAS"
+        )
+
+        # sanitize_cached_doc debe corregir documentos cacheados erróneamente
+        cached = {
+            "seccion": None,
+            "libro": 107,
+            "tomo": "AUXILIAR",
+            "volumen": None,
+            "fraccionamiento": "FRACCIONAMIENTO_DETECTADO",
+            "anio": 1993,
+            "es_auxiliar": True,
+            "transcripcion_literal": "AUTORIZA EL PRESENTE LIBRO NUMERO 107, AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS",
+            "evidencias": ["Fraccionamiento detectado: 'FRACCIONAMIENTOS Y COLONIAS'"]
+        }
+        repaired, changed = ClaudeVisionEngine.sanitize_cached_doc(cached)
+        self.assertTrue(changed)
+        self.assertEqual(repaired["fraccionamiento"], "FRACCIONAMIENTOS_Y_COLONIAS")
+
 
 if __name__ == "__main__":
     unittest.main()
