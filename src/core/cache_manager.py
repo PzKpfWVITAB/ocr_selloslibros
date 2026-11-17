@@ -22,6 +22,9 @@ class CacheManager:
         self.cache_file = self.cache_dir / "claude_vision_cache.json"
         self._data: Dict[str, Any] = self._load_disk_cache()
 
+        self.folder_cache_file = self.cache_dir / "folder_diagnoses_cache.json"
+        self._folder_cache: Dict[str, Any] = self._load_folder_disk_cache()
+
         # Estadísticas de la sesión y acumuladas
         self.stats = {
             "local_cache_hits": 0,
@@ -64,6 +67,82 @@ class CacheManager:
             )
         except Exception:
             pass
+
+    def _load_folder_disk_cache(self) -> Dict[str, Any]:
+        if self.folder_cache_file.exists():
+            try:
+                raw_cache = json.loads(self.folder_cache_file.read_text(encoding="utf-8"))
+                if isinstance(raw_cache, dict):
+                    return raw_cache
+            except Exception:
+                return {}
+        return {}
+
+    def _save_folder_disk_cache(self) -> None:
+        try:
+            self.folder_cache_file.write_text(
+                json.dumps(self._folder_cache, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def compute_folder_signature(folder_path: Path) -> str:
+        """
+        Calcula una firma ultrarrápida del contenido de la carpeta:
+        nombres de archivo, tamaños y timestamps de modificación.
+        """
+        try:
+            p = Path(folder_path)
+            if not p.exists() or not p.is_dir():
+                return ""
+            items = []
+            for f in sorted(p.iterdir(), key=lambda x: x.name):
+                if f.is_file():
+                    st = f.stat()
+                    items.append(f"{f.name}:{st.st_size}:{st.st_mtime_ns}")
+            sig_raw = "|".join(items)
+            return hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+
+    def get_folder_diagnosis(self, folder_path: Path) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            p_str = str(Path(folder_path).resolve())
+            entry = self._folder_cache.get(p_str)
+            if not entry or not isinstance(entry, dict):
+                return None
+            current_sig = self.compute_folder_signature(folder_path)
+            if entry.get("signature") == current_sig and entry.get("diagnosis"):
+                self.stats["local_cache_hits"] += 1
+                return dict(entry["diagnosis"])
+            return None
+
+    def save_folder_diagnosis(self, folder_path: Path, diagnosis: Dict[str, Any]) -> None:
+        with self._lock:
+            p_str = str(Path(folder_path).resolve())
+            current_sig = self.compute_folder_signature(folder_path)
+            # Guardar una copia limpia del diagnóstico
+            diag_copy = dict(diagnosis)
+            self._folder_cache[p_str] = {
+                "signature": current_sig,
+                "folder_name": Path(folder_path).name,
+                "saved_at": diag_copy.get("saved_at") or "",
+                "diagnosis": diag_copy
+            }
+            self._save_folder_disk_cache()
+
+    def invalidate_folder_diagnosis(self, folder_path: Path) -> None:
+        with self._lock:
+            p_str = str(Path(folder_path).resolve())
+            if p_str in self._folder_cache:
+                del self._folder_cache[p_str]
+                self._save_folder_disk_cache()
+
+    def get_all_folder_diagnoses(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            return dict(self._folder_cache)
 
     @staticmethod
     def compute_pdf_key(pdf_path: Path, max_pages: int = 3) -> str:
@@ -111,11 +190,14 @@ class CacheManager:
             count = len(self._data)
             self._data.clear()
             self._save_disk_cache()
+            self._folder_cache.clear()
+            self._save_folder_disk_cache()
             return count
 
     def get_summary(self) -> Dict[str, Any]:
         with self._lock:
             return {
                 "cached_documents_on_disk": len(self._data),
+                "cached_folders_on_disk": len(self._folder_cache),
                 **self.stats
             }

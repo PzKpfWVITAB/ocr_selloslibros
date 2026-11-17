@@ -3666,9 +3666,10 @@ class OCRLibrosApp(tk.Tk):
             )
 
         def _done(res, err):
+            self.refresh_execution_history()
+            self._refresh_master_table()
+            self._refresh_header_badge()
             if err:
-                self.reload_root_preview()
-                self.refresh_execution_history()
                 messagebox.showerror("Error Paso 1", f"{err}\n\nRevisa la pestaña de Historial: el lote quedó registrado y puede revertirse.", parent=self)
                 return
             self._on_step1_finished(res)
@@ -3745,14 +3746,13 @@ class OCRLibrosApp(tk.Tk):
                 )
 
             def _done(res, w_err):
+                self.refresh_execution_history()
+                self._refresh_master_table()
+                self._refresh_header_badge()
                 if w_err:
-                    self.reload_root_preview()
-                    self.refresh_execution_history()
                     messagebox.showerror("Error Paso 2A", f"{w_err}\n\nSi se movieron carpetas, el lote está registrado y puede revertirse.", parent=self)
                     return
                 self.reload_root_preview()
-                self.refresh_execution_history()
-                self._refresh_header_badge()
                 messagebox.showinfo(
                     "Paso 2A Completado",
                     f"Paso 2A finalizado (Lote #{res.get('ejecucion_id')}):\n"
@@ -3884,14 +3884,13 @@ class OCRLibrosApp(tk.Tk):
                 )
 
             def _done(res, w_err):
+                self.refresh_execution_history()
+                self._refresh_master_table()
+                self._refresh_header_badge()
                 if w_err:
-                    self.reload_root_preview()
-                    self.refresh_execution_history()
                     messagebox.showerror("Error Paso 2C", f"{w_err}\n\nSi se movieron carpetas, el lote está registrado y puede revertirse.", parent=self)
                     return
                 self.reload_root_preview()
-                self.refresh_execution_history()
-                self._refresh_header_badge()
                 messagebox.showinfo(
                     "Paso 2C Completado",
                     f"Paso 2C finalizado (Lote #{res.get('ejecucion_id')}):\n"
@@ -4014,9 +4013,10 @@ class OCRLibrosApp(tk.Tk):
             )
 
         def _done(res, err):
+            self.refresh_execution_history()
+            self._refresh_master_table()
+            self._refresh_header_badge()
             if err:
-                self.reload_root_preview()
-                self.refresh_execution_history()
                 messagebox.showerror("Error Paso 3", f"{err}\n\nSi se movió algo, el lote está en el Historial y puede revertirse.", parent=self)
                 return
             self._on_step3_finished(label, res)
@@ -4033,6 +4033,24 @@ class OCRLibrosApp(tk.Tk):
         if not targets:
             messagebox.showinfo("Sin Pendientes", "No hay carpetas listas (COINCIDE_TOTAL) para mover a Correctos.", parent=self)
             return
+
+        root_path = self.path_var.get().strip()
+        if root_path and validados_dir:
+            try:
+                if Path(root_path).resolve() == Path(validados_dir).resolve():
+                    if not messagebox.askyesno(
+                        "Paso 3B: Convalidar en Dir. Correctos",
+                        f"La carpeta raíz actual es el mismo Directorio de Correctos:\n{validados_dir}\n\n"
+                        f"Se convalidarán {len(targets)} carpeta(s) 'COINCIDE TOTAL' y se registrarán en MySQL como lote.\n"
+                        "¿Deseas continuar?",
+                        parent=self
+                    ):
+                        return
+                    self._run_step3("CORRECTOS", validados_dir, "Correctos")
+                    return
+            except Exception:
+                pass
+
         if not messagebox.askyesno("Paso 3B: Mover Correctas", f"Se moverán {len(targets)} carpeta(s) a:\n{validados_dir}\n\nQuedará un lote revertible. ¿Continuar?", parent=self):
             return
         self._run_step3("CORRECTOS", validados_dir, "Correctos")
@@ -4052,18 +4070,29 @@ class OCRLibrosApp(tk.Tk):
         self._run_step3("APARTADOS", apartados_dir, "Apartados")
 
     def _on_step3_finished(self, dest_label: str, res: Dict[str, Any]):
-        self.reload_root_preview()
         self._refresh_master_table()
         self.refresh_execution_history()
         self._refresh_header_badge()
-        messagebox.showinfo(
-            f"Paso 3 ({dest_label}) Completado",
-            f"Lote #{res.get('ejecucion_id')} finalizado:\n"
-            f"• Carpetas movidas: {res.get('movidas', 0)}\n"
-            f"• Archivos movidos: {res.get('archivos_movidos', 0)}\n"
-            f"• Errores: {len(res.get('errores', []))}",
-            parent=self
-        )
+
+        errores = res.get("errores", [])
+        movidas = res.get("movidas", 0)
+        archivos_movidos = res.get("archivos_movidos", 0)
+        ejec_id = res.get("ejecucion_id")
+
+        msg_lines = [
+            f"Paso 3 ({dest_label}) Finalizado (Lote #{ejec_id or 'S/N'}):",
+            f"• Carpetas procesadas con éxito: {movidas}",
+            f"• Archivos PDF procesados: {archivos_movidos}",
+        ]
+        if errores:
+            msg_lines.append(f"\n⚠ Ocurrieron {len(errores)} error(es):")
+            for e in errores[:10]:
+                msg_lines.append(f"  • {e}")
+            if len(errores) > 10:
+                msg_lines.append(f"  ... y {len(errores) - 10} errores adicionales.")
+            messagebox.showwarning(f"Paso 3 ({dest_label}) con Observaciones", "\n".join(msg_lines), parent=self)
+        else:
+            messagebox.showinfo(f"Paso 3 ({dest_label}) Completado", "\n".join(msg_lines), parent=self)
 
     def _refresh_all_tabs(self):
         """Refresca la tabla maestra y los contadores de todas las pestañas."""
@@ -4272,15 +4301,42 @@ class OCRLibrosApp(tk.Tk):
         try:
             subfolders = self._resolve_valid_subfolders(folder_path)
             previews = self.service.preview_folders_caratulas(subfolders)
+
+            # Mapear elementos que ya estaban diagnosticados en memoria para no destruirlos
+            existing_by_path: Dict[str, Dict[str, Any]] = {}
+            for item in self.all_folder_items:
+                p_str = item.get("folder_path")
+                if p_str and item.get("veredicto_global") not in ("PENDIENTE", "PENDIENTE_DIAGNOSTICO"):
+                    try:
+                        existing_by_path[str(Path(p_str).resolve())] = item
+                    except Exception:
+                        pass
+
             self.all_folder_items.clear()
 
             for p_item in previews:
                 f_path = p_item["folder_path"]
+                f_resolved = str(Path(f_path).resolve())
                 f_data = p_item["folder_data"]
                 custom_c = self.custom_caratulas_map.get(f_path)
                 c_path = custom_c if (custom_c and os.path.exists(custom_c)) else p_item["caratula_path"]
                 c_name = Path(c_path).name if c_path else "NO DETECTADA"
 
+                # 1. Si ya estaba diagnosticada en memoria en esta sesión, preservarla intacta
+                if f_resolved in existing_by_path:
+                    self.all_folder_items.append(existing_by_path[f_resolved])
+                    continue
+
+                # 2. Si cuenta con diagnóstico persistente en disco (0 tokens), restaurarla de inmediato
+                cached_diag = p_item.get("cached_diagnosis")
+                if cached_diag and isinstance(cached_diag, dict):
+                    cached_diag["folder_path"] = f_path
+                    cached_diag["folder_name"] = p_item["folder_name"]
+                    cached_diag["folder_data"] = f_data
+                    self.all_folder_items.append(cached_diag)
+                    continue
+
+                # 3. Solo si es una carpeta nueva o sin diagnosticar, inicializar como PENDIENTE
                 self.all_folder_items.append({
                     "folder_path": f_path,
                     "folder_data": f_data,
@@ -5474,11 +5530,19 @@ class OCRLibrosApp(tk.Tk):
             self._refresh_master_table()
             self._render_single_folder_detail(res)
             self._refresh_header_badge()
-            messagebox.showinfo(
-                "Carpeta Movida a Correctos",
-                f"La carpeta fue movida exitosamente a:\n{op_res['new_folder_path']}\n"
-                f"({op_res['files_moved_count']} archivos registrados en '✅ Ya Hecho / Cambios Aplicados')."
-            )
+            if op_res.get('already_in_destination'):
+                msg = (
+                    f"La carpeta ya se encontraba en el directorio de Correctos:\n{op_res['new_folder_path']}\n\n"
+                    f"Se convalidó exitosamente ({op_res['files_moved_count']} archivos registrados en '✅ Ya Hecho / Cambios Aplicados')."
+                )
+                title = "Carpeta Convalidada en Correctos"
+            else:
+                msg = (
+                    f"La carpeta fue movida exitosamente a:\n{op_res['new_folder_path']}\n\n"
+                    f"({op_res['files_moved_count']} archivos registrados en '✅ Ya Hecho / Cambios Aplicados')."
+                )
+                title = "Carpeta Movida a Correctos"
+            messagebox.showinfo(title, msg)
         except Exception as exc:
             messagebox.showerror("Error al mover carpeta a correctos", str(exc))
 
@@ -5568,6 +5632,9 @@ class OCRLibrosApp(tk.Tk):
                     results_payload.append(res)
                     processed_count += 1
                 except Exception as exc:
+                    r["last_error"] = str(exc)
+                    r["last_action"] = f"❌ Error: {exc}"
+                    logger.error(f"Fallo en lote '{op_title}' para '{folder_name}': {exc}", exc_info=True)
                     errors.append(f"{folder_name}: {exc}")
 
                 self.after(0, self._on_async_item_finished, r, idx, total)
@@ -5628,11 +5695,17 @@ class OCRLibrosApp(tk.Tk):
             except Exception:
                 pass
 
-        summary_msg = f"{op_title} Finalizada:\n\nCarpetas procesadas: {processed} de {total}\n"
+        summary_msg = f"{op_title} Finalizada:\n\nCarpetas procesadas con éxito: {processed} de {total}\n"
         if self.stop_requested:
             summary_msg += "⚠ Operación detenida antes de completar todo el lote.\n"
-        summary_msg += f"Errores: {len(errors)}" if errors else "Sin errores."
-        messagebox.showinfo(op_title, summary_msg)
+        if errors:
+            summary_msg += f"\n❌ Ocurrieron {len(errors)} error(es):\n" + "\n".join(f"  • {e}" for e in errors[:10])
+            if len(errors) > 10:
+                summary_msg += f"\n  ... y {len(errors) - 10} errores adicionales."
+            messagebox.showwarning(f"{op_title} con Observaciones", summary_msg)
+        else:
+            summary_msg += "Sin errores."
+            messagebox.showinfo(op_title, summary_msg)
 
     def batch_apply_all_corrections(self):
         if self.dry_run_mode_var.get():

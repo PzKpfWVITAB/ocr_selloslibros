@@ -58,14 +58,28 @@ def safe_replace(src: Any, dst: Any, max_retries: int = 4, delay: float = 0.3) -
 def safe_move(src: Any, dst: Any, max_retries: int = 4, delay: float = 0.3) -> None:
     """
     Mueve un archivo/directorio de forma segura con reintentos automáticos para Windows.
+    Si origen y destino resuelven a la misma ruta, no realiza ninguna acción (no-op seguro).
     """
     src_p = Path(src)
     dst_p = Path(dst)
+    try:
+        if src_p.resolve() == dst_p.resolve():
+            return
+    except Exception:
+        pass
+
     for attempt in range(max_retries):
         try:
             shutil.move(str(src_p), str(dst_p))
             return
-        except (PermissionError, OSError) as exc:
+        except (PermissionError, OSError, shutil.Error) as exc:
+            # Si el error indica que se intenta mover sobre sí mismo o ya existe en la misma ruta
+            if "into itself" in str(exc).lower() or "same file" in str(exc).lower():
+                try:
+                    if src_p.resolve() == dst_p.resolve():
+                        return
+                except Exception:
+                    pass
             if attempt < max_retries - 1:
                 time.sleep(delay * (2 ** attempt))
             else:
@@ -1203,6 +1217,7 @@ class FileOperations:
             "new_folder_path": str(target_folder_path),
             "error_subfolder": clean_sub,
             "files_moved_count": moved_count,
+            "already_in_destination": (folder.resolve() == target_folder_path.resolve()),
         }
 
     @classmethod

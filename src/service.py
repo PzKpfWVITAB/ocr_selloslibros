@@ -94,16 +94,23 @@ class FolderOCRService:
         """
         return PDFSelector.get_valid_subfolders(root_path)
 
-    @staticmethod
-    def preview_folders_caratulas(subfolders: List[Path]) -> List[Dict[str, Any]]:
+    def preview_folders_caratulas(self, subfolders: List[Path]) -> List[Dict[str, Any]]:
         """
         Pre-escanea rápidamente la lista de carpetas para auto-detectar el archivo PDF
         que contiene la palabra 'CARATULA' en cada una antes de correr el diagnóstico.
+        Si la carpeta ya cuenta con diagnóstico persistido en disco (0 tokens), lo adjunta para restaurarlo.
         """
         items: List[Dict[str, Any]] = []
         for idx, folder in enumerate(subfolders, start=1):
             caratula_pdf = CaratulaInspector.auto_detect_caratula(folder)
             all_pdfs = CaratulaInspector.list_folder_pdfs(folder)
+            cached_diag = None
+            if hasattr(self, "cache") and self.cache:
+                try:
+                    cached_diag = self.cache.get_folder_diagnosis(folder)
+                except Exception:
+                    cached_diag = None
+
             items.append({
                 "index": idx,
                 "folder_path": str(folder),
@@ -112,6 +119,7 @@ class FolderOCRService:
                 "caratula_path": str(caratula_pdf) if caratula_pdf else None,
                 "caratula_filename": caratula_pdf.name if caratula_pdf else "NO DETECTADA",
                 "total_pdfs": len(all_pdfs),
+                "cached_diagnosis": cached_diag,
             })
         return items
 
@@ -296,6 +304,20 @@ class FolderOCRService:
         start_time = time.perf_counter()
         folder_p = Path(folder_path)
         folder_data = FolderParser.parse(folder_p.name)
+
+        # 0. Comprobar si ya existe un diagnóstico en el caché persistente en disco (0 tokens)
+        if not force_claude_on_missing_caratula and hasattr(self, "cache") and self.cache:
+            try:
+                cached_diag = self.cache.get_folder_diagnosis(folder_p)
+                if cached_diag is not None:
+                    cached_diag["from_folder_cache"] = True
+                    cached_diag["folder_path"] = str(folder_p)
+                    cached_diag["folder_name"] = folder_p.name
+                    cached_diag["folder_data"] = folder_data
+                    return cached_diag
+            except Exception as cache_err:
+                logger.warning(f"Aviso al consultar caché persistente de carpeta: {cache_err}")
+
         clean_current_code = FileOperations.strip_suffix_after_year(folder_p.name, folder_data)
 
         # Paso 2A: Chequeo estricto de estructura de 7 posiciones (0 tokens)
@@ -885,8 +907,13 @@ class FolderOCRService:
         return result
 
     def _save_diagnosis_result(self, result: Dict[str, Any]) -> None:
-        """Método mantenido por compatibilidad; los diagnósticos ya no usan SQLite."""
-        return None
+        """Persiste el diagnóstico completo de la carpeta en cache/folder_diagnoses_cache.json."""
+        try:
+            f_path_str = result.get("folder_path")
+            if f_path_str and hasattr(self, "cache") and self.cache:
+                self.cache.save_folder_diagnosis(Path(f_path_str), result)
+        except Exception as e:
+            logger.warning(f"No se pudo guardar diagnóstico en caché de carpeta: {e}")
 
     # =========================================================================
     # FASE 2: OPERACIONES FÍSICAS, MODO DRY RUN Y ROLLBACK TOTAL
@@ -1049,6 +1076,13 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"🛠 Carátula Aplicada ({count} PDFs)"
         diag_result["files_modified_count"] = diag_result.get("files_modified_count", 0) + count
+
+        if hasattr(self, "cache") and self.cache and folder_path:
+            try:
+                self.cache.save_folder_diagnosis(Path(folder_path), diag_result)
+            except Exception:
+                pass
+
         return res
 
     @exclusive_op("Renombrar carpeta")
@@ -1208,6 +1242,14 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"✏️ Renombrada ({res['new_folder_name']})"
         diag_result["files_modified_count"] = res["files_renamed_count"]
+
+        if hasattr(self, "cache") and self.cache:
+            try:
+                if str(folder_path) != str(new_folder_path):
+                    self.cache.invalidate_folder_diagnosis(Path(folder_path))
+                self.cache.save_folder_diagnosis(new_folder_path, diag_result)
+            except Exception:
+                pass
 
         return res
 
@@ -1527,6 +1569,14 @@ class FolderOCRService:
         diag_result["applied_actions"] = actions
         diag_result["last_action"] = f"📦 Apartada ({error_sub})"
         diag_result["files_modified_count"] = res["files_moved_count"]
+
+        if hasattr(self, "cache") and self.cache:
+            try:
+                if str(folder_path) != str(new_p):
+                    self.cache.invalidate_folder_diagnosis(Path(folder_path))
+                self.cache.save_folder_diagnosis(new_p, diag_result)
+            except Exception:
+                pass
         return res
 
     @exclusive_op("Mover a Correctos")
@@ -1583,10 +1633,22 @@ class FolderOCRService:
         diag_result["moved_destination_type"] = "CORRECTOS"
 
         actions = list(diag_result.get("applied_actions", []))
-        actions.append(f"✅ Movida a Correctos -> {new_p.name}")
+        if res.get("already_in_destination"):
+            actions.append(f"✅ Convalidada en Dir. Correctos -> {new_p.name}")
+            diag_result["last_action"] = "✅ Convalidada en Correctos"
+        else:
+            actions.append(f"✅ Movida a Correctos -> {new_p.name}")
+            diag_result["last_action"] = "✅ Movida a Correctos"
         diag_result["applied_actions"] = actions
-        diag_result["last_action"] = "✅ Movida a Correctos"
         diag_result["files_modified_count"] = res["files_moved_count"]
+
+        if hasattr(self, "cache") and self.cache:
+            try:
+                if str(folder_path) != str(new_p):
+                    self.cache.invalidate_folder_diagnosis(Path(folder_path))
+                self.cache.save_folder_diagnosis(new_p, diag_result)
+            except Exception:
+                pass
         return res
 
     # =========================================================================
@@ -1896,6 +1958,7 @@ class FolderOCRService:
                 movidas += 1
                 archivos_movidos += n_pdfs
             except Exception as exc:
+                logger.error(f"Fallo al trasladar '{fname}' en Paso 3 ({mode}): {exc}", exc_info=True)
                 errors.append(f"{fname}: {exc}")
 
         self.mysql.finalizar_ejecucion_lote(
@@ -1965,6 +2028,7 @@ class FolderOCRService:
                 )
                 auditadas += 1
             except Exception as exc:
+                logger.error(f"Fallo al trasladar '{fname}' en Paso 3 ({mode}): {exc}", exc_info=True)
                 errors.append(f"{fname}: {exc}")
 
         self.mysql.finalizar_ejecucion_lote(
@@ -2041,7 +2105,8 @@ class FolderOCRService:
                 old_str = str(sf_path.resolve())
                 dest_str = str(dest_folder)
 
-                shutil.move(old_str, dest_str)
+                if old_str != dest_str:
+                    safe_move(old_str, dest_str)
                 try:
                     self.mysql.registrar_movimiento_carpeta(
                         ejecucion_id=ejecucion_id,
@@ -2054,12 +2119,14 @@ class FolderOCRService:
                         cantidad_archivos=n_pdfs,
                     )
                 except Exception as log_exc:
-                    shutil.move(dest_str, old_str)
+                    if old_str != dest_str:
+                        safe_move(dest_str, old_str)
                     raise RuntimeError(f"Error al registrar en MySQL, traslado deshecho: {log_exc}")
 
                 movidas += 1
                 archivos_movidos += n_pdfs
             except Exception as exc:
+                logger.error(f"Fallo al mover carpeta validada '{fname}' a '{dest_folder}': {exc}", exc_info=True)
                 errors.append(f"{fname}: {exc}")
 
         self.mysql.finalizar_ejecucion_lote(
@@ -2127,6 +2194,7 @@ class FolderOCRService:
                 movidas += 1
                 archivos_movidos += int(mv.get("files_moved_count", 0))
             except Exception as exc:
+                logger.error(f"Fallo al trasladar '{fname}' en Paso 3 ({mode}): {exc}", exc_info=True)
                 errors.append(f"{fname}: {exc}")
 
         self.mysql.finalizar_ejecucion_lote(
