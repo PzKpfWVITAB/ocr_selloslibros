@@ -321,6 +321,75 @@ class TestCaratulaPage2Insertion(unittest.TestCase):
         doc2_rev.close()
         self.assertEqual(FileOperations.compute_sha256(f2), orig_f2_hash)
 
+    def test_07_subsequent_pdfs_with_real_text_on_p1_detects_caratula_p2(self):
+        """
+        Valida que si los PDFs subsecuentes tienen texto en su Página 1 (asientos registrales
+        reales con texto desde el inicio), NO se descarte la carátula de la Página 2 del primer PDF,
+        sino que se identifique correctamente y se marquen para inserción.
+        """
+        folder = self.root_dir / "01_02_10_00_00_00_2001"
+        folder.mkdir()
+
+        caratula_text = "REGISTRO PUBLICO SECCION 02 LIBRO 10 TOMO 00 ANIO 2001"
+        f1 = folder / "01_02_10_00_00_00_2001_0001.pdf"
+        f2 = folder / "01_02_10_00_00_00_2001_0002.pdf"
+        f3 = folder / "01_02_10_00_00_00_2001_0003.pdf"
+
+        # f1: Pág 1 blanco, Pág 2 carátula
+        _create_test_pdf(f1, [None, caratula_text])
+        # f2 y f3: Tienen texto real desde la Pág 1 (asientos registrales)
+        _create_test_pdf(f2, ["ASIENTO NUMERO 2: COMPRAVENTA", "HOJA 2 COMPRAVENTA"])
+        _create_test_pdf(f3, ["ASIENTO NUMERO 3: HIPOTECA BANCARIA"])
+
+        insp = CaratulaInspector.inspect_folder(folder)
+        self.assertEqual(insp["status"], "CARATULA_PAGINA_2_COMPARTIDA")
+        self.assertEqual(insp["info_page_num"], 2)
+        self.assertIn("0001.pdf", insp["caratula_path"])
+
+        targets = [p["pdf_name"] for p in insp["replaceable_pdfs"]]
+        self.assertIn("01_02_10_00_00_00_2001_0002.pdf", targets)
+        self.assertIn("01_02_10_00_00_00_2001_0003.pdf", targets)
+        self.assertEqual(len(targets), 2)
+
+    def test_08_folder_in_zeros_never_coincide_total_diagnoses_p2(self):
+        """
+        Valida el caso reportado por el usuario con carpetas en ceros (01_00_00_00_00_00_0000_8):
+        - Nunca debe ser catalogada como COINCIDE_TOTAL bajo el pretexto de 0 tokens.
+        - Debe priorizar la Página 2 del primer PDF con número de inscripción más bajo.
+        - Con IA mockeada, debe diagnosticar el libro real y requerir inserción de P2 y renombre.
+        """
+        folder = self.root_dir / "01_00_00_00_00_00_0000_8"
+        folder.mkdir()
+
+        caratula_p2 = "EN LA CIUDAD DE TUXTLA GUTIERREZ AUTORIZA EL LIBRO 247 AUXILIAR SECCION PRIMERA 2005"
+        f1 = folder / "01_00_00_00_00_00_0000_0001.pdf"
+        f2 = folder / "01_00_00_00_00_00_0000_0002.pdf"
+
+        _create_test_pdf(f1, [None, caratula_p2])
+        _create_test_pdf(f2, ["ASIENTO 2 ESCRITURA 1234"])
+
+        mock_doc = {
+            "seccion": "01",
+            "libro": "247",
+            "tomo": "AUXILIAR",
+            "volumen": "00",
+            "fraccionamiento": "00",
+            "anio": "2005",
+            "es_auxiliar": True,
+            "evidencias": ["Leído de Página 2: Sección 01, Libro 247, Tomo AUXILIAR, Año 2005"],
+        }
+
+        with patch("src.core.claude_engine.ClaudeVisionEngine.analyze_document_pages", return_value=(mock_doc, {"input_tokens": 100})):
+            diag = self.service.process_folder(str(folder), save_to_db=False)
+
+        self.assertNotEqual(diag["veredicto_global"], "COINCIDE_TOTAL")
+        self.assertEqual(diag["veredicto_global"], "REQUIERE_RENOMBRE_E_INSERCION_P2")
+        self.assertEqual(diag["codigo_base_sugerido"], "01_01_247_AUXILIAR_00_00_2005")
+        self.assertTrue(diag["needs_page_replacement"])
+        self.assertTrue(diag["needs_rename"])
+        self.assertEqual(len(diag["caratula_inspection"]["replaceable_pdfs"]), 1)
+        self.assertEqual(diag["caratula_inspection"]["replaceable_pdfs"][0]["pdf_name"], "01_00_00_00_00_00_0000_0002.pdf")
+
 
 if __name__ == "__main__":
     unittest.main()

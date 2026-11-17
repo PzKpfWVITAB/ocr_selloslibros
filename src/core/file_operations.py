@@ -10,6 +10,7 @@ import pymupdf as fitz
 
 from src.core.settings_manager import SettingsManager
 from src.core.logger import get_logger
+from src.core.pdf_selector import natural_sort_key
 
 logger = get_logger("file_operations")
 
@@ -469,7 +470,7 @@ class FileOperations:
         if target_pdfs is None:
             all_pdfs = sorted(
                 [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
-                key=lambda x: x.name,
+                key=lambda x: natural_sort_key(x.name),
             )
             target_pdfs = [
                 f for f in all_pdfs
@@ -633,7 +634,7 @@ class FileOperations:
 
         all_pdfs = sorted(
             [f for f in orig_folder.iterdir() if f.is_file() and f.suffix.lower() == ".pdf"],
-            key=lambda x: x.name
+            key=lambda x: natural_sort_key(x.name)
         )
 
         if not src_c_path:

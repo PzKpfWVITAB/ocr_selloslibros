@@ -378,10 +378,16 @@ class FolderOCRService:
 
         # Paso 2B: Carpeta homogénea SIN archivo de carátula independiente
         if not struct["has_caratula_file"] and not custom_caratula_path:
-            # Comprobar si cumple con el patrón de Página 1 en blanco y Página 2 con datos registrales
+            # Comprobar si cumple con el patrón de carátula en Página 2 o carátula embebida candidata
             insp_pre = CaratulaInspector.inspect_folder(folder_p)
-            if insp_pre.get("status") == "CARATULA_PAGINA_2_COMPARTIDA":
+            c_pre_status = insp_pre.get("status")
+
+            if c_pre_status in ("CARATULA_PAGINA_2_COMPARTIDA", "CARATULA_EMBEBIDA_CANDIDATA"):
                 # NO clasificar como directo a Correctos. Debe enviarse a revisión con IA e inserción de carátula.
+                pass
+            elif folder_data.get("libro_val") in [0, "0", "00", None] or folder_data.get("anio_val") in [0, "0", "0000", None]:
+                # ⛔ NUNCA auto-aprobar como COINCIDE_TOTAL si la carpeta tiene Libro o Año en ceros (ej. 01_00_00_00_00_00_0000).
+                # Pasar a Paso 2C para inspección y análisis.
                 pass
             else:
                 ev_lines = [
@@ -1764,18 +1770,30 @@ class FolderOCRService:
                     "tiene_caratula": False,
                     "clasificacion": "REQUIERE_IA",
                     "accion": "🔍 Inspeccionar Pág. 2 con IA + Insertar en PDFs",
-                    "motivo": "Página 1 compartida en blanco; Pág. 2 del primer PDF contiene datos registrales para insertar",
+                    "motivo": "Página 2 del primer PDF contiene datos registrales para insertar y renombrar",
                 })
             elif not struct["has_caratula_file"]:
-                items.append({
-                    "carpeta": sf.name,
-                    "ruta": str(sf),
-                    "total_pdfs": struct["total_pdfs"],
-                    "tiene_caratula": False,
-                    "clasificacion": "CORRECTOS",
-                    "accion": "Directo a Correctos (Carátula embebida, 0 tokens)",
-                    "motivo": "Estructura 100% homogénea sin archivo de carátula externa",
-                })
+                sf_data = FolderParser.parse(sf.name)
+                if sf_data.get("libro_val") in [0, "0", "00", None] or sf_data.get("anio_val") in [0, "0", "0000", None]:
+                    items.append({
+                        "carpeta": sf.name,
+                        "ruta": str(sf),
+                        "total_pdfs": struct["total_pdfs"],
+                        "tiene_caratula": False,
+                        "clasificacion": "REQUIERE_IA",
+                        "accion": "🔍 Diagnóstico con IA (Carpeta en Ceros)",
+                        "motivo": "Carpeta con Libro o Año en ceros requiere identificación y diagnóstico con IA",
+                    })
+                else:
+                    items.append({
+                        "carpeta": sf.name,
+                        "ruta": str(sf),
+                        "total_pdfs": struct["total_pdfs"],
+                        "tiene_caratula": False,
+                        "clasificacion": "CORRECTOS",
+                        "accion": "Directo a Correctos (Carátula embebida, 0 tokens)",
+                        "motivo": "Estructura 100% homogénea sin archivo de carátula externa",
+                    })
             else:
                 c_names = ", ".join(struct["caratula_files"][:2])
                 items.append({
