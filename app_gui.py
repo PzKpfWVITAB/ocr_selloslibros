@@ -3922,7 +3922,7 @@ class OCRLibrosApp(tk.Tk):
         """
         targets = [
             r for r in self.all_folder_items
-            if r.get("needs_rename", False)
+            if (r.get("needs_rename", False) or r.get("needs_page_replacement", False) or r.get("embedded_caratula_to_create"))
             and r.get("codigo_base_sugerido")
             and r.get("veredicto_global") not in (
                 "PENDIENTE_DIAGNOSTICO", "APARTAR_CARATULA_BLANCA", "SIN_ARCHIVO_CARATULA",
@@ -3966,9 +3966,9 @@ class OCRLibrosApp(tk.Tk):
                 fname = Path(r.get("folder_path", "")).name
                 self.after(0, self._update_async_status, idx, len(targets), f"Corrigiendo [{idx}/{len(targets)}]: {fname}")
                 try:
-                    res = self.service.execute_folder_and_pdfs_rename(r, ejecucion_id=ejec_id)
+                    res = self.service.execute_all_pending_corrections(r, ejecucion_id=ejec_id)
                     renombradas += 1
-                    archivos_totales += res.get("files_renamed_count", 0)
+                    archivos_totales += res.get("modified_count", 0)
                 except Exception as exc:
                     errores.append(f"{fname}: {exc}")
 

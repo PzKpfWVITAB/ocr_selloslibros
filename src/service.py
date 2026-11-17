@@ -1023,6 +1023,7 @@ class FolderOCRService:
         diag_result: Dict[str, Any],
         dry_run: Optional[bool] = None,
         dry_run_dir: Optional[str] = None,
+        ejecucion_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Reemplaza la hoja en blanco adjunta o inserta la página de carátula en los PDFs
@@ -1054,6 +1055,7 @@ class FolderOCRService:
                 info_page_num=int(info_page_num),
                 target_pdfs=target_pdfs,
                 mysql_manager=self.mysql,
+                ejecucion_id=ejecucion_id,
             )
             count = res.get("inserted_count", 0)
             res["replaced_count"] = count
@@ -1066,6 +1068,7 @@ class FolderOCRService:
                 replaceable_pdfs=replaceable_pdfs,
                 db_manager=None,
                 mysql_manager=self.mysql,
+                ejecucion_id=ejecucion_id,
             )
             count = res.get("replaced_count", 0)
             msg = f"✔ Hoja de carátula aplicada exitosamente (Pág. {info_page_num}) en {count} PDF(s) (archivos REG intactos)."
@@ -1327,6 +1330,7 @@ class FolderOCRService:
         diag_result: Dict[str, Any],
         dry_run: Optional[bool] = None,
         dry_run_dir: Optional[str] = None,
+        ejecucion_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Ejecuta en un solo paso todas las correcciones físicas pendientes en disco:
@@ -1347,7 +1351,7 @@ class FolderOCRService:
         # Paso 1: Reemplazo o inserción de carátulas en blanco
         if diag_result.get("needs_page_replacement") and diag_result.get("caratula_inspection", {}).get("replaceable_pdfs"):
             try:
-                rep_res = self.execute_page_replacement(diag_result)
+                rep_res = self.execute_page_replacement(diag_result, ejecucion_id=ejecucion_id)
                 cnt = rep_res.get("replaced_count", 0)
                 modified_count += cnt
                 applied_now.append(f"🛠 Carátula corregida en {cnt} PDF(s)")
@@ -1367,7 +1371,7 @@ class FolderOCRService:
         # Paso 3: Renombrado de carpeta y PDFs (conservando DUP e ignorando REG)
         if diag_result.get("needs_rename"):
             try:
-                ren_res = self.execute_folder_and_pdfs_rename(diag_result)
+                ren_res = self.execute_folder_and_pdfs_rename(diag_result, ejecucion_id=ejecucion_id)
                 cnt = ren_res.get("files_renamed_count", 0)
                 modified_count += cnt
                 applied_now.append(f"✏️ Renombrada carpeta y {cnt} PDF(s)")
