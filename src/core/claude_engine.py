@@ -25,6 +25,11 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
      * "SECCIÓN TERCERA" -> 3
      * "SECCIÓN CUARTA" -> 4
      * "SECCIÓN QUINTA" -> 5
+   - REGLA CRÍTICA PARA LIBROS AUXILIARES CON SECCIÓN NUMERADA:
+     * Si el libro es AUXILIAR (con o sin número de libro, ej. "LIBRO 247 AUXILIAR", "LIBRO SEGUNDO AUXILIAR") Y el documento menciona además una sección numerada (ej. "SECCIÓN PRIMERA", "(SECCIÓN PRIMERA)", "RELATIVO A FRACCIONAMIENTOS Y COLONIAS (SECCIÓN PRIMERA)"):
+       - "seccion" DEBE SER EL NÚMERO CORRESPONDIENTE (1, 2, 3, 4 o 5).
+       - ESTÁ ESTRICTAMENTE PROHIBIDO poner seccion=null o 00 pensando que la palabra AUXILIAR anula la sección numerada.
+       - "AUXILIAR" ocupa la posición de Tomo (o Libro si no tiene número), pero "seccion" CONSERVA SU NÚMERO (ej. seccion=1).
    - Si el acta de apertura dice "SECCION DE CREDITO AGRICOLA", "SECCION DE ACTOS Y CONTRATOS", "LIBRO AUXILIAR", etc. (sin decir Sección Primera, Segunda, Tercera, Cuarta o Quinta), "seccion" DEBE SER null (que equivale a 00), y ese nombre alfanumérico ("CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "AUXILIAR") DEBE colocarse en el campo "tomo".
    - REGLA CRÍTICA DE FALSOS POSITIVOS:
      La institución se llama "REGISTRO PÚBLICO DE LA PROPIEDAD Y DE COMERCIO". NUNCA asignes seccion=1 ni seccion=2 solo por el nombre de la institución.
@@ -201,7 +206,11 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                 "properties": {
                     "seccion": {
                         "type": ["integer", "null"],
-                        "description": "Solo entero 1..5 si dice SECCIÓN PRIMERA..QUINTA. Si no tiene sección numerada o es sección alfanumérica (ej. Crédito Agrícola, Actos y Contratos), DEBE ser null.",
+                        "description": (
+                            "Solo entero 1..5 si dice explícitamente SECCIÓN PRIMERA..QUINTA (ej. 'SECCIÓN PRIMERA' -> 1). "
+                            "OBLIGATORIO: Incluso si el libro es AUXILIAR (ej. LIBRO 247 AUXILIAR), si el documento dice 'SECCIÓN PRIMERA', "
+                            "debe asignarse seccion=1 (NUNCA anular la sección numerada por ser auxiliar). Si no tiene sección numerada, null."
+                        ),
                     },
                     "libro": {
                         "type": ["integer", "string", "null"],
@@ -532,6 +541,25 @@ class ClaudeVisionEngine:
         return s
 
     @classmethod
+    def extract_numbered_section(cls, text: str) -> Optional[int]:
+        """
+        Detecta determinísticamente si el texto contiene una mención de sección numerada
+        (ej. 'SECCIÓN PRIMERA', 'SECCIÓN SEGUNDA', '(SECCIÓN PRIMERA)').
+        Nunca se anula una sección numerada porque el libro sea AUXILIAR.
+        """
+        if not text:
+            return None
+        t = TextNormalizer.strip_accents(str(text).upper())
+        m = re.search(
+            r'\bSECCION\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?(PRIMERA|SEGUNDA|TERCERA|CUARTA|QUINTA|1|2|3|4|5|I|II|III|IV|V)\b',
+            t
+        )
+        if m:
+            val = m.group(1)
+            return TextNormalizer.normalize_section(val)
+        return None
+
+    @classmethod
     def extract_specific_fraccionamiento(cls, text: str) -> Optional[str]:
         if not text:
             return None
@@ -758,6 +786,20 @@ class ClaudeVisionEngine:
                 repaired["fraccionamiento"] = norm_f
                 changed = True
 
+        # --- REGLA 3: Recuperación determinística de Sección Numerada si está en null o ceros ---
+        curr_sec = repaired.get("seccion")
+        if curr_sec is None or str(curr_sec).strip() in ["0", "00", "NULL", "NONE"]:
+            all_txt_sec = f"{transcripcion_literal} " + " ".join(
+                str(e) for e in evidencias if not cls._is_negative_or_absence_line(str(e))
+            )
+            found_sec = cls.extract_numbered_section(all_txt_sec)
+            if found_sec is not None and found_sec != curr_sec:
+                repaired["seccion"] = found_sec
+                ev_list = list(repaired.get("evidencias", []))
+                ev_list.append(f"ℹ Sección numerada detectada en texto: 'SECCIÓN {found_sec}' (recuperada determinísticamente)")
+                repaired["evidencias"] = ev_list
+                changed = True
+
         return (repaired, True) if changed else (doc, False)
 
     @classmethod
@@ -778,6 +820,7 @@ class ClaudeVisionEngine:
         if not isinstance(evidencias, list):
             evidencias = [str(evidencias)]
 
+        transcripcion_literal = str(data.get("transcripcion_literal") or "").strip()
         texto_descriptivo = str(data.get("texto_descriptivo") or "").strip()
         comentarios_ia = str(data.get("comentarios_ia") or "").strip()
         if not texto_descriptivo and comentarios_ia:
@@ -818,6 +861,16 @@ class ClaudeVisionEngine:
                     alnum_from_sec = cleaned_s
         else:
             sec_val = None
+
+        # REGLA DETERMINÍSTICA: Si la sección no vino definida numéricamente (null o 0),
+        # pero el documento menciona explícitamente una sección numerada (ej. 'SECCIÓN PRIMERA',
+        # '(SECCIÓN PRIMERA)', etc.), recuperarla determinísticamente del texto.
+        # NUNCA se anula la sección numerada porque el libro sea AUXILIAR.
+        if sec_val is None:
+            all_txt_for_sec = f"{transcripcion_literal}\n{evidencias_joined}\n{texto_descriptivo}"
+            detected_sec = cls.extract_numbered_section(all_txt_for_sec)
+            if detected_sec is not None:
+                sec_val = detected_sec
 
         # 2. Libro y detección de AUXILIAR
         es_aux = bool(fields_src.get("es_auxiliar", False))

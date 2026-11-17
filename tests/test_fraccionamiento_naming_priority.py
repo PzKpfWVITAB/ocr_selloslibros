@@ -183,6 +183,84 @@ class TestFraccionamientoNamingPriority(unittest.TestCase):
         )
         self.assertEqual(sugerido, "01_01_238_AUXILIAR_00_FRACCIONAMIENTO_3_DE_MAYO_2004")
 
+    def test_extract_numbered_section(self):
+        self.assertEqual(
+            ClaudeVisionEngine.extract_numbered_section("RELATIVO A FRACCIONAMIENTOS Y COLONIAS (SECCIÓN PRIMERA)"),
+            1
+        )
+        self.assertEqual(
+            ClaudeVisionEngine.extract_numbered_section("LIBRO 247 AUXILIAR CORRESPONDIENTE A LA SECCION SEGUNDA"),
+            2
+        )
+        self.assertIsNone(
+            ClaudeVisionEngine.extract_numbered_section("SECCION DE CREDITO AGRICOLA")
+        )
+
+    def test_auxiliar_with_seccion_primera_punta_diamante(self):
+        # Caso reportado por el usuario: Libro 247 Auxiliar con 'SECCION PRIMERA'
+        # Claude devolvió seccion: null pensando que por ser Auxiliar se anulaba la sección numerada.
+        raw_json = """
+        {
+            "transcripcion_literal": "AUTORIZA EL LIBRO 247 AUXILIAR... RELATIVO A FRACCIONAMIENTOS Y COLONIAS (SECCIÓN PRIMERA) PARA REGISTRAR EL FRACCIONAMIENTO PUNTA DIAMANTE 2005",
+            "datos_estructurados": {
+                "seccion": null,
+                "libro": 247,
+                "tomo": "AUXILIAR",
+                "volumen": null,
+                "fraccionamiento": "FRACCIONAMIENTO_PUNTA_DIAMANTE",
+                "anio": 2005,
+                "es_auxiliar": true
+            },
+            "comentarios_ia": "El documento menciona SECCION PRIMERA entre parentesis pero dado que el libro es auxiliar queda anulada",
+            "evidencias": [
+                "'AUTORIZA EL LIBRO 247 AUXILIAR' -> libro=247, tomo=AUXILIAR",
+                "'RELATIVO A FRACCIONAMIENTOS Y COLONIAS (SECCIÓN PRIMERA)' -> fraccionamiento relacionado",
+                "'PARA REGISTRAR EL FRACCIONAMIENTO PUNTA DIAMANTE' -> fraccionamiento=FRACCIONAMIENTO_PUNTA_DIAMANTE"
+            ]
+        }
+        """
+        parsed = ClaudeVisionEngine._parse_claude_json(raw_json)
+        self.assertEqual(parsed["seccion"], 1)
+        self.assertEqual(parsed["libro"], 247)
+        self.assertEqual(parsed["tomo"], "AUXILIAR")
+        self.assertEqual(parsed["fraccionamiento"], "FRACCIONAMIENTO_PUNTA_DIAMANTE")
+        self.assertEqual(parsed["anio"], 2005)
+
+        # Verificar que coincida con la carpeta del usuario
+        folder_data = FolderParser.parse("01_01_247_AUXILIAR_00_FRACCIONAMIENTO_PUNTA_DIAMANTE_2005")
+        comp = FolderComparator.compare(folder_data, parsed)
+        self.assertEqual(comp["veredicto"], "COINCIDE_TOTAL")
+        self.assertEqual(len(comp["discrepancias"]), 0)
+
+        sugerido = FileOperations.build_clean_folder_code(
+            delegacion=folder_data["delegacion"],
+            seccion=parsed["seccion"],
+            libro=parsed["libro"],
+            tomo=parsed["tomo"],
+            volumen=parsed["volumen"],
+            fraccionamiento=parsed["fraccionamiento"],
+            anio=parsed["anio"]
+        )
+        self.assertEqual(sugerido, "01_01_247_AUXILIAR_00_FRACCIONAMIENTO_PUNTA_DIAMANTE_2005")
+
+    def test_sanitize_cached_doc_recovers_seccion_primera_for_auxiliar(self):
+        cached_doc = {
+            "seccion": None,
+            "libro": 247,
+            "tomo": "AUXILIAR",
+            "volumen": None,
+            "fraccionamiento": "FRACCIONAMIENTO_PUNTA_DIAMANTE",
+            "anio": 2005,
+            "es_auxiliar": True,
+            "transcripcion_literal": "LIBRO 247 AUXILIAR",
+            "evidencias": ["'RELATIVO A FRACCIONAMIENTOS Y COLONIAS (SECCIÓN PRIMERA)'"]
+        }
+        repaired, changed = ClaudeVisionEngine.sanitize_cached_doc(cached_doc)
+        self.assertTrue(changed)
+        self.assertEqual(repaired["seccion"], 1)
+        self.assertEqual(repaired["libro"], 247)
+        self.assertEqual(repaired["tomo"], "AUXILIAR")
+
 
 if __name__ == "__main__":
     unittest.main()
