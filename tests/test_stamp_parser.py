@@ -58,8 +58,9 @@ class TestStampParser(unittest.TestCase):
 
         self.assertIsNotNone(result["fraccionamiento"])
         self.assertTrue(
-            "TERRENO UBICADO EN" in result["fraccionamiento"].upper() or 
-            "PREDIO RUSTICO" in result["fraccionamiento"].upper()
+            "TERRENO" in result["fraccionamiento"].upper() or 
+            "PREDIO" in result["fraccionamiento"].upper() or
+            "SAN_ANTONIO" in result["fraccionamiento"].upper()
         )
 
     def test_claude_json_parser_and_default_settings(self):

@@ -56,14 +56,24 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
    - Si no se menciona Volumen, devuelve null.
 
 5. "fraccionamiento" (cadena en mayúsculas con guiones bajos, o null):
-   - Se utiliza en dos situaciones:
-     a) Cuando el libro está dedicado a Fraccionamientos, Colonias o Predios específicos:
-        * "INDICE DE COLONIAS" o "COLONIAS" -> "COLONIAS"
-        * "FRACCIONAMIENTOS Y COLONIAS" -> "FRACCIONAMIENTOS_Y_COLONIAS"
+   - REGLA CRÍTICA DE PRIORIDAD PARA FRACCIONAMIENTOS:
+     * Si el documento menciona la categoría general "FRACCIONAMIENTOS Y COLONIAS", "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS", "INDICE DE COLONIAS" o "COLONIAS", PERO en cualquier parte del texto se especifica el NOMBRE CONCRETO del fraccionamiento (ej. "...DEL FRACCIONAMIENTO SAN FERNANDO...", "...FRACCIONAMIENTO SOLIDARIDAD...", "...PREDIO DENOMINADO..."):
+       - ESTÁ ESTRICTAMENTE PROHIBIDO usar únicamente "FRACCIONAMIENTOS_Y_COLONIAS" o "COLONIAS".
+       - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_PATRIA_NUEVA").
+       - El formato OBLIGATORIO es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
+       - ÚNICAMENTE debes usar "FRACCIONAMIENTOS_Y_COLONIAS" si en TODO el documento no existe ninguna mención de un fraccionamiento, colonia o predio en particular.
+   - Casos y Formatos:
+     a) Cuando el libro está dedicado a un Fraccionamiento, Colonia o Predio específico:
+        * Formato siempre en mayúsculas con prefijo: "FRACCIONAMIENTO_<NOMBRE>"
+        * "FRACCIONAMIENTO SAN FERNANDO" -> "FRACCIONAMIENTO_SAN_FERNANDO"
         * "FRACCIONAMIENTO SOLIDARIDAD" -> "FRACCIONAMIENTO_SOLIDARIDAD"
         * "FRACCIONAMIENTO PATRIA NUEVA" -> "FRACCIONAMIENTO_PATRIA_NUEVA"
         * "FRACCIONAMIENTO RESIDENCIAL HACIENDA" -> "FRACCIONAMIENTO_RESIDENCIAL_HACIENDA"
         * "FRACCIONAMIENTO LOMAS DEL SUR" -> "FRACCIONAMIENTO_LOMAS_DEL_SUR"
+        * "COLONIA LAS FLORES" -> "FRACCIONAMIENTO_LAS_FLORES"
+        * "PREDIO SAN CARLOS" -> "FRACCIONAMIENTO_SAN_CARLOS"
+        * Si NO menciona ningún fraccionamiento específico pero dice "INDICE DE COLONIAS" o "COLONIAS" -> "COLONIAS"
+        * Si NO menciona ningún fraccionamiento específico pero dice "FRACCIONAMIENTOS Y COLONIAS" -> "FRACCIONAMIENTOS_Y_COLONIAS"
      b) Cuando la posición de "tomo" ya está ocupada por "AUXILIAR" y el libro auxiliar especifica una materia como "ACTOS Y CONTRATOS" o "CREDITO AGRICOLA":
         * Ejemplo: "LIBRO 1 UNO AUXILIAR PARA LLEVAR EL ORIGINAL DE ACTOS Y CONTRATOS" -> "libro": 1, "tomo": "AUXILIAR", "fraccionamiento": "ACTOS_Y_CONTRATOS".
    - Si el libro NO es AUXILIAR, entonces "CREDITO_AGRICOLA" y "ACTOS_Y_CONTRATOS" van en "tomo" y "fraccionamiento" debe ser null.
@@ -211,8 +221,12 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                     "fraccionamiento": {
                         "type": ["string", "null"],
                         "description": (
-                            "Nombre del fraccionamiento/colonia en mayúsculas con guiones bajos (ej. 'COLONIAS', 'FRACCIONAMIENTOS_Y_COLONIAS'), "
-                            "o la materia ('ACTOS_Y_CONTRATOS', 'CREDITO_AGRICOLA') cuando 'tomo' ya está ocupado por 'AUXILIAR'. Si no aplica, null."
+                            "Nombre específico del fraccionamiento con formato 'FRACCIONAMIENTO_<NOMBRE>' en mayúsculas con guiones bajos "
+                            "(ej. 'FRACCIONAMIENTO_SAN_FERNANDO', 'FRACCIONAMIENTO_SOLIDARIDAD'). "
+                            "REGLA ESTRICTA: Si el documento menciona 'FRACCIONAMIENTOS Y COLONIAS' o 'AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS' pero más adelante especifica un nombre, "
+                            "SIEMPRE usar 'FRACCIONAMIENTO_<NOMBRE>' y NUNCA solo 'FRACCIONAMIENTOS_Y_COLONIAS'. "
+                            "Solo usar 'FRACCIONAMIENTOS_Y_COLONIAS' o 'COLONIAS' si no se menciona ningún fraccionamiento específico en todo el texto. "
+                            "O la materia ('ACTOS_Y_CONTRATOS', 'CREDITO_AGRICOLA') cuando 'tomo' ya está ocupado por 'AUXILIAR'. Si no aplica, null."
                         ),
                     },
                     "anio": {
@@ -464,6 +478,76 @@ class ClaudeVisionEngine:
         return s
 
     @staticmethod
+    def clean_fraccionamiento_name(raw: str) -> str:
+        stop_words = [
+            r'\bDE\s+ESTA\s+CIUDAD\b',
+            r'\bEN\s+ESTA\s+CIUDAD\b',
+            r'\bUBICADO\s+EN\b',
+            r'\bSITO\s+EN\b',
+            r'\bEN\s+TUXTLA\s+GUTIERREZ\b',
+            r'\bDE\s+TUXTLA\s+GUTIERREZ\b',
+            r'\bTUXTLA\s+GUTIERREZ\b',
+            r'\bDEL\s+DISTRITO\b',
+            r'\bEN\s+EL\s+DISTRITO\b',
+            r'\bDE\s+TUXTLA\b',
+            r'\bEN\s+TUXTLA\b',
+            r'\bMUNICIPIO\s+DE\b',
+            r'\bDEL\s+MUNICIPIO\b',
+            r'\bEN\s+EL\s+MUNICIPIO\b',
+            r'\bDEL\s+ESTADO\b',
+            r'\bEN\s+EL\s+ESTADO\b',
+            r'\bCHIAPAS\b',
+            r'\bPARA\s+EL\s+A[NÑ]O\b',
+            r'\bDEL\s+A[NÑ]O\b',
+            r'\b(?:19\d{2}|20\d{2})\b',
+            r'\bCORRESPONDIENTE\b',
+            r'\bAUTORIZA\b',
+            r'\bQUE\s+CONSTA\b',
+            r'\bLIBRO\b',
+            r'\bTOMO\b',
+            r'\bVOLUMEN\b',
+            r'\bSECCION\b',
+            r'\bFOLIO\b',
+            r'\bREGISTRO\s+PUBLICO\b'
+        ]
+        s = TextNormalizer.strip_accents(str(raw).strip().upper())
+        for sw in stop_words:
+            s = re.split(sw, s, flags=re.IGNORECASE)[0].strip()
+        s = re.sub(r'^[\s,.;:"\'\-_]+|[\s,.;:"\'\-_]+$', '', s)
+        s = re.sub(r'[^A-Z0-9]+', '_', s).strip('_')
+        s = re.sub(r'_(?:19\d{2}|20\d{2})$', '', s)
+        return s
+
+    @classmethod
+    def extract_specific_fraccionamiento(cls, text: str) -> Optional[str]:
+        if not text:
+            return None
+        normalized = TextNormalizer.strip_accents(str(text).upper())
+        pat = re.compile(
+            r'\b(?:DEL\s+|PARA\s+EL\s+|EN\s+EL\s+)?(?:FRACCIONAMIENTO|FRACCION\s+D[EC]|COLONIA|PREDIO\s+DENOMINADO|PREDIO)\s+(?!Y\s+COLONIAS\b|O\s+COLONIAS\b|URBANOS?\b)([A-Z0-9\s,\'\"\.\-_]{3,60})',
+            re.IGNORECASE
+        )
+        for m in pat.finditer(normalized):
+            candidate = cls.clean_fraccionamiento_name(m.group(1))
+            if len(candidate) >= 3 and candidate not in ['Y_COLONIAS', 'COLONIAS', 'DE', 'DEL', 'LOS', 'LAS', 'LA', 'EL', 'GENERAL']:
+                return f"FRACCIONAMIENTO_{candidate}"
+        return None
+
+    @classmethod
+    def normalize_fraccionamiento_label(cls, val: str) -> str:
+        if not val:
+            return val
+        s = TextNormalizer.strip_accents(str(val).strip().upper())
+        if s in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "00", "0", "NULL", "NONE"]:
+            return s
+        s = cls.clean_fraccionamiento_name(s)
+        if s.startswith("FRACCIONAMIENTO_"):
+            return s
+        if s.startswith("FRACCION_"):
+            return f"FRACCIONAMIENTO_{s[9:]}"
+        return f"FRACCIONAMIENTO_{s}"
+
+    @staticmethod
     def _is_negative_or_absence_line(line: str) -> bool:
         """
         Detecta si una línea de evidencia es un comentario negativo o de ausencia
@@ -547,8 +631,11 @@ class ClaudeVisionEngine:
         """
         Verifica determinísticamente una detección (de caché o recién salida de Claude)
         contra las citas literales del documento:
-        Si NO aparece explícitamente la palabra 'AUXILIAR' en el texto literal del documento,
-        el documento NO es auxiliar (restaura el Tomo numérico original y limpia Volumen).
+        1. Si NO aparece explícitamente la palabra 'AUXILIAR' en el texto literal del documento,
+           el documento NO es auxiliar (restaura el Tomo numérico original y limpia Volumen).
+        2. Si el fraccionamiento es genérico ('FRACCIONAMIENTOS_Y_COLONIAS' o 'COLONIAS'),
+           pero en el texto se nombra un fraccionamiento específico, PREVALECE el específico
+           con formato 'FRACCIONAMIENTO_<NOMBRE>'.
         """
         if not isinstance(doc, dict):
             return doc, False
@@ -564,10 +651,12 @@ class ClaudeVisionEngine:
         if not has_any_text_evidence:
             return doc, False
 
-        has_positive_aux = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
+        repaired = dict(doc)
+        changed = False
 
+        # --- REGLA 1: Sanitización de AUXILIAR espurio ---
+        has_positive_aux = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
         if (doc.get("tomo") == "AUXILIAR" or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
-            repaired = dict(doc)
             repaired["es_auxiliar"] = False
 
             # Recuperar el tomo real desde las evidencias afirmativas o desde el volumen desplazado
@@ -635,9 +724,28 @@ class ClaudeVisionEngine:
             if cleaned_evidencias:
                 repaired["evidencias"] = cleaned_evidencias
 
-            return repaired, True
+            changed = True
 
-        return doc, False
+        # --- REGLA 2: Prioridad de Fraccionamientos Específicos sobre genéricos ---
+        curr_fracc = repaired.get("fraccionamiento")
+        all_text = f"{transcripcion_literal} " + " ".join(
+            str(e) for e in evidencias if not cls._is_negative_or_absence_line(str(e))
+        )
+        if curr_fracc in ["FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "FRACCIONAMIENTOS", None, "00", "0"]:
+            specific_f = cls.extract_specific_fraccionamiento(all_text)
+            if specific_f and specific_f != curr_fracc:
+                repaired["fraccionamiento"] = specific_f
+                ev_list = list(repaired.get("evidencias", []))
+                ev_list.append(f"ℹ Fraccionamiento específico detectado: '{specific_f}' (reemplaza genérico '{curr_fracc}')")
+                repaired["evidencias"] = ev_list
+                changed = True
+        elif curr_fracc and str(curr_fracc).strip().upper() not in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "NULL", "NONE"]:
+            norm_f = cls.normalize_fraccionamiento_label(str(curr_fracc))
+            if norm_f != curr_fracc:
+                repaired["fraccionamiento"] = norm_f
+                changed = True
+
+        return (repaired, True) if changed else (doc, False)
 
     @classmethod
     def _parse_claude_json(cls, raw_text: str) -> Dict[str, Any]:
@@ -848,7 +956,16 @@ class ClaudeVisionEngine:
                 else:
                     fracc_val = cleaned_f
             else:
-                fracc_val = cleaned_f
+                fracc_val = cls.normalize_fraccionamiento_label(cleaned_f)
+
+        # REGLA DE PRIORIDAD: Si fraccionamiento es genérico ('FRACCIONAMIENTOS_Y_COLONIAS', 'COLONIAS') o None,
+        # pero el texto del documento especifica el nombre concreto de un fraccionamiento/predio/colonia,
+        # PREVALECE el nombre específico con formato 'FRACCIONAMIENTO_<NOMBRE>'.
+        all_text_context = f"{transcripcion_literal}\n{evidencias_joined}\n{texto_descriptivo}"
+        if fracc_val is None or fracc_val in ["FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "FRACCIONAMIENTOS"]:
+            specific_fracc = cls.extract_specific_fraccionamiento(all_text_context)
+            if specific_fracc:
+                fracc_val = specific_fracc
 
         # Si Tomo es AUXILIAR y el documento además pertenece a ACTOS_Y_CONTRATOS o CREDITO_AGRICOLA,
         # colocar esa categoría en la posición de Fraccionamiento

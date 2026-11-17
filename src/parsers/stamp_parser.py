@@ -41,16 +41,29 @@ class StampParser:
         # -------------------------------------------------------------
         # 1. REGLA AUXILIAR:
         # Solo clasificar como libro AUXILIAR si el texto especifica "LIBRO AUXILIAR",
-        # "L. AUXILIAR" o en el contexto del libro/sección, evitando falsos positivos
+        # "L. AUXILIAR" o "LIBRO [N] AUXILIAR", evitando falsos positivos
         # por cargos o firmas de funcionarios ("C. Registrador Auxiliar").
+        # Si tiene número (ej. "LIBRO 173 AUXILIAR"), Libro=173 y Tomo='AUXILIAR'.
         # -------------------------------------------------------------
-        es_libro_auxiliar = bool(re.search(
-            r'\b(?:LIBRO|L\.|SECCION|TOMO)\s*(?:DE\s+)?AUXILIAR\b|\bLIBRO\s*:\s*AUXILIAR\b',
+        m_lib_num_aux = re.search(
+            r'\bLIBRO\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?([A-Z0-9#]+(?:\s*\([A-Z0-9]+\))?)\s+(?:VOLUMEN\s+[A-Z0-9]+\s+)?AUXILIAR\b',
             normalized_full
-        ))
-        if es_libro_auxiliar:
-            detections["libro"] = "AUXILIAR"
-            detections["evidencias"].append("Detectada mención explícita 'LIBRO AUXILIAR'")
+        )
+        if m_lib_num_aux:
+            raw_l_aux = m_lib_num_aux.group(1).strip()
+            parsed_l_aux = TextNormalizer.parse_number_or_word(raw_l_aux)
+            if parsed_l_aux is not None:
+                detections["libro"] = parsed_l_aux
+                detections["tomo"] = "AUXILIAR"
+                detections["evidencias"].append(f"Detectado 'LIBRO {raw_l_aux} AUXILIAR' -> libro={parsed_l_aux}, tomo='AUXILIAR'")
+        else:
+            es_libro_auxiliar = bool(re.search(
+                r'\b(?:LIBRO|L\.|SECCION|TOMO)\s*(?:DE\s+)?AUXILIAR\b|\bLIBRO\s*:\s*AUXILIAR\b',
+                normalized_full
+            ))
+            if es_libro_auxiliar:
+                detections["libro"] = "AUXILIAR"
+                detections["evidencias"].append("Detectada mención explícita 'LIBRO AUXILIAR'")
 
         # -------------------------------------------------------------
         # 2. PATRÓN COMPUESTO DEL SELLO OFICIAL:
@@ -163,18 +176,20 @@ class StampParser:
 
         # -------------------------------------------------------------
         # 5. FRACCIONAMIENTO / PREDIO:
-        # "normalmente en fraccionamiento lleva otro texto con el nombre del mismo"
+        # Prioridad estricta: Si tiene nombre específico, SIEMPRE usar FRACCIONAMIENTO_<NOMBRE>.
+        # Solo si no hay nombre específico usar genérico 'FRACCIONAMIENTOS_Y_COLONIAS' o 'COLONIAS'.
         # -------------------------------------------------------------
-        m_fracc = re.search(
-            r'\b(?:FRACCIONAMIENTO|FRACCION D[EC]|PREDIO RUSTICO DENOMINADO)\s+([A-Z0-9\s,.-]{5,40})',
-            normalized_full
-        )
-        if m_fracc:
-            raw_fracc = m_fracc.group(1).strip()
-            # Limpiar trailing chars
-            raw_fracc = re.sub(r'[\r\n]+', ' ', raw_fracc)
-            detections["fraccionamiento"] = raw_fracc
-            detections["evidencias"].append(f"Fraccionamiento/Predio detectado: '{raw_fracc}'")
+        from src.core.claude_engine import ClaudeVisionEngine
+        spec_f = ClaudeVisionEngine.extract_specific_fraccionamiento(normalized_full)
+        if spec_f:
+            detections["fraccionamiento"] = spec_f
+            detections["evidencias"].append(f"Fraccionamiento específico detectado: '{spec_f}'")
+        elif re.search(r'\bFRACCIONAMIENTOS\s+Y\s+COLONIAS\b', normalized_full):
+            detections["fraccionamiento"] = "FRACCIONAMIENTOS_Y_COLONIAS"
+            detections["evidencias"].append("Categoría general detectada: 'FRACCIONAMIENTOS_Y_COLONIAS'")
+        elif re.search(r'\b(?:INDICE\s+DE\s+)?COLONIAS\b', normalized_full):
+            detections["fraccionamiento"] = "COLONIAS"
+            detections["evidencias"].append("Categoría general detectada: 'COLONIAS'")
 
         # -------------------------------------------------------------
         # 6. AÑO: (ej. "DEL AÑO DOS MIL CINCO", "2005", "10-Noviembre-2004")
