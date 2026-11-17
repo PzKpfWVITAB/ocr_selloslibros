@@ -66,7 +66,10 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
        - ESTÁ ESTRICTAMENTE PROHIBIDO usar únicamente "FRACCIONAMIENTOS_Y_COLONIAS" o "COLONIAS".
        - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_3_DE_MAYO").
        - REGLA CRÍTICA DE LIMPIEZA: NUNCA incluyas conectores como "DEL", "DE", "PARA EL AÑO" ni el año dentro de "fraccionamiento" (ej. si el documento dice "FRACCIONAMIENTO 3 DE MAYO DEL 2004" o "FRACCIONAMIENTO 5 DE MAYO DEL 2005", el fraccionamiento es "FRACCIONAMIENTO_3_DE_MAYO" o "FRACCIONAMIENTO_5_DE_MAYO", NUNCA "FRACCIONAMIENTO_3_DE_MAYO_DEL" ni "FRACCIONAMIENTO_3_DE_MAYO_DEL_2004").
-       - NUNCA inventes o uses palabras explicativas como "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_GENERAL" o "FRACCIONAMIENTO_ESPECIFICO".
+       - PROHIBICIÓN ABSOLUTA DE COMENTARIOS O FRASES EXPLICATIVAS:
+         ESTÁ ESTRICTAMENTE PROHIBIDO incluir comentarios, notas, explicaciones o palabras como "CONCRETO", "TEXTO_VISIBLE", "PARECE_REFERIRSE", "NO_SE_ESPECIFICA", "SIN_NOMBRE", "DETECTADO", "ENCONTRADO" dentro de "fraccionamiento".
+         Tus notas u observaciones deben ir EXCLUSIVAMENTE en el campo 'comentarios_ia'.
+         Si en el documento no se menciona explícitamente el nombre propio de una colonia o fraccionamiento, DEBES proponer obligatoriamente "FRACCIONAMIENTOS_Y_COLONIAS" (si es libro de fraccionamientos) o null (si es de otra materia).
        - Si el documento dice únicamente "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS" o "FRACCIONAMIENTOS Y COLONIAS" y NO menciona explícitamente el nombre de un fraccionamiento, colonia o predio específico, DEBES proponer obligatoriamente "FRACCIONAMIENTOS_Y_COLONIAS".
        - El formato OBLIGATORIO para fraccionamientos específicos es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
        - ÚNICAMENTE debes usar "FRACCIONAMIENTOS_Y_COLONIAS" si en TODO el documento no existe ninguna mención de un fraccionamiento, colonia o predio en particular.
@@ -581,6 +584,16 @@ class ClaudeVisionEngine:
         "INDICE", "REGISTRO", "OFICIAL", "AUXILIAR", "URBANO", "URBANOS", "RURAL", "RURALES",
         "TERRENO", "TERRENOS", "PREDIO", "PREDIOS", "LOTE", "LOTES",
         "NULL", "NONE", "NINGUNO", "NINGUNA", "NO", "SIN",
+        "CONCRETO", "CONCRETA", "CONCRETOS", "CONCRETAS",
+        "TEXTO", "TEXTOS", "VISIBLE", "VISIBLES", "LEGIBLE", "LEGIBLES", "ILEGIBLE", "ILEGIBLES",
+        "PARECE", "PARECEN", "REFERIRSE", "REFIERE", "REFIEREN", "REFERENCIA", "REFERENCIAS",
+        "ESPECIFICA", "ESPECIFICAR", "ESPECIFIQUE", "MENCIONA", "MENCIONAR", "MENCIONE",
+        "OBSERVA", "OBSERVAR", "COMENTARIO", "COMENTARIOS", "DESCRIPCION", "DESCRIPCIONES",
+        "EXPLICACION", "EXPLICACIONES", "ANALISIS", "DOCUMENTO", "DOCUMENTOS",
+        "INDICA", "INDICAR", "SENALA", "SENALAR", "ESTIPULA", "ESTIPULAR",
+        "PROBABLE", "PROBABLEMENTE", "APARENTE", "APARENTEMENTE",
+        "EXISTE", "EXISTEN", "CONSTA", "CONSTAN", "FIGURA", "FIGURAN",
+        "NINGUN", "NINGUNO", "NINGUNA", "NINGUNOS", "NINGUNAS",
     }
 
     @classmethod
@@ -608,9 +621,12 @@ class ClaudeVisionEngine:
             candidate = cls.clean_fraccionamiento_name(m.group(1))
             if not candidate or len(candidate) < 3:
                 continue
-            if candidate in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
+            cand_tokens = set(candidate.split("_"))
+            # Si contiene palabras prohibidas en cualquier parte o es una frase explicativa
+            if candidate in cls.DISALLOWED_FRACCIONAMIENTO_NAMES or cand_tokens.intersection(cls.DISALLOWED_FRACCIONAMIENTO_NAMES):
                 continue
-            # Si el candidato empieza con un metatoken no permitido
+            if len(candidate.split("_")) > 5:
+                continue
             first_tok = candidate.split("_")[0]
             if first_tok in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
                 sub_cand = "_".join(candidate.split("_")[1:]).strip("_")
@@ -636,6 +652,18 @@ class ClaudeVisionEngine:
         cleaned_body = cls.clean_fraccionamiento_name(s_body)
         if not cleaned_body or cleaned_body in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
             return "FRACCIONAMIENTOS_Y_COLONIAS"
+
+        # Validar que ningún token dentro del cuerpo pertenezca a frases de razonamiento de la IA
+        body_tokens = set(cleaned_body.split("_"))
+        disallowed_in_body = {
+            "CONCRETO", "TEXTO", "VISIBLE", "PARECE", "REFERIRSE", "ESPECIFICA", "MENCIONA",
+            "OBSERVA", "COMENTARIO", "DESCRIPCION", "INDICA", "SENALA", "NINGUN", "NINGUNO",
+            "EXISTE", "CONSTA", "FIGURA", "APARENTE", "PROBABLE", "DETECTADO", "ENCONTRADO",
+            "ESPECIFICO", "GENERAL"
+        }
+        if body_tokens.intersection(disallowed_in_body) or len(cleaned_body.split("_")) > 5:
+            return "FRACCIONAMIENTOS_Y_COLONIAS"
+
         first_tok = cleaned_body.split("_")[0]
         if first_tok in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
             sub_body = "_".join(cleaned_body.split("_")[1:]).strip("_")
@@ -745,16 +773,15 @@ class ClaudeVisionEngine:
         has_any_text_evidence = bool(transcripcion_literal) or any(
             not str(ev).strip().startswith(("⚡", "🤖", "📄")) for ev in evidencias
         )
-        if not has_any_text_evidence:
-            return doc, False
 
         repaired = dict(doc)
         changed = False
 
         # --- REGLA 1: Sanitización de AUXILIAR espurio ---
-        has_positive_aux = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
-        if (doc.get("tomo") == "AUXILIAR" or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
-            repaired["es_auxiliar"] = False
+        if has_any_text_evidence:
+            has_positive_aux = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
+            if (doc.get("tomo") == "AUXILIAR" or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
+                repaired["es_auxiliar"] = False
 
             # Recuperar el tomo real desde las evidencias afirmativas o desde el volumen desplazado
             restored_tomo: Optional[int] = None
@@ -825,12 +852,16 @@ class ClaudeVisionEngine:
 
         # --- REGLA 2: Prioridad de Fraccionamientos Específicos sobre genéricos ---
         curr_fracc = repaired.get("fraccionamiento")
-        # Reparar valores espurios cacheados como FRACCIONAMIENTO_DETECTADO a su valor genérico real
+        curr_fracc_str = str(curr_fracc or "").upper()
+        # Reparar valores espurios cacheados como FRACCIONAMIENTO_DETECTADO o frases explicativas de la IA
         if curr_fracc in [
             "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_MENCIONADO",
             "FRACCIONAMIENTO_PROPUESTO", "FRACCIONAMIENTO_SUGERIDO", "FRACCIONAMIENTO_ESPECIFICO",
             "FRACCIONAMIENTO_GENERAL"
-        ]:
+        ] or any(bad in curr_fracc_str for bad in [
+            "CONCRETO", "TEXTO", "VISIBLE", "PARECE", "REFERIRSE", "ESPECIFICA",
+            "MENCIONA", "OBSERVA", "COMENTARIO", "EXPLICACION", "DESCRIPCION"
+        ]) or len(curr_fracc_str.split("_")) > 6:
             curr_fracc = "FRACCIONAMIENTOS_Y_COLONIAS"
             repaired["fraccionamiento"] = "FRACCIONAMIENTOS_Y_COLONIAS"
             changed = True
