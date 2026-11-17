@@ -278,7 +278,7 @@ class FolderOCRService:
         if not caratula_files and is_homogeneous and regular_pdfs:
             try:
                 reg_paths = [folder_p / name for name in regular_pdfs]
-                p2_check = CaratulaInspector.detect_shared_blank_p1_with_p2_info(reg_paths)
+                p2_check = CaratulaInspector.detect_shared_blank_p1_with_p2_info(reg_paths, quick_check=True)
                 if p2_check is not None:
                     has_p2_shared = True
             except Exception as e:
@@ -377,6 +377,7 @@ class FolderOCRService:
             }
 
         # Paso 2B: Carpeta homogénea SIN archivo de carátula independiente
+        insp_pre = None
         if not struct["has_caratula_file"] and not custom_caratula_path:
             # Comprobar si cumple con el patrón de carátula en Página 2 o carátula embebida candidata
             insp_pre = CaratulaInspector.inspect_folder(folder_p)
@@ -434,8 +435,8 @@ class FolderOCRService:
                     "cache_summary": self.cache.get_summary(),
                 }
 
-        # Paso 2C: Carpeta homogénea CON archivo de carátula independiente -> Inspección y análisis con Claude Vision (2 páginas)
-        insp = CaratulaInspector.inspect_folder(folder_p, custom_caratula_path=custom_caratula_path)
+        # Paso 2C: Carpeta homogénea CON archivo de carátula independiente (o candidata P1/P2) -> Inspección y análisis con Claude Vision
+        insp = insp_pre if insp_pre is not None else CaratulaInspector.inspect_folder(folder_p, custom_caratula_path=custom_caratula_path)
         c_status = insp["status"]
         caratula_path_str = insp.get("caratula_path")
         info_page_num = insp.get("info_page_num")
