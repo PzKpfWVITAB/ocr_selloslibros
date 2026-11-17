@@ -27,6 +27,7 @@ class MySQLManager:
         self.password = self.settings.get("mysql_password", "")
         self.database = self.settings.get("mysql_database", "trazabilidad_selloslibros")
         self.enabled = bool(self.settings.get("mysql_enabled", True))
+        self._schema_verified = False
 
     def update_config(self, host: str, port: int, user: str, password: str, database: str, enabled: bool = True):
         self.host = host.strip()
@@ -35,6 +36,26 @@ class MySQLManager:
         self.password = password
         self.database = database.strip()
         self.enabled = enabled
+        self._schema_verified = False
+
+    def ensure_schema(self) -> bool:
+        """
+        Garantiza que la base de datos, todas las tablas y columnas requeridas
+        (incluyendo migraciones como 'backup_path') existan en el servidor MySQL.
+        Es idempotente y utiliza un flag en memoria para evitar sobrecostos.
+        """
+        if not self.enabled:
+            return False
+        if getattr(self, "_schema_verified", False):
+            return True
+        try:
+            ok, _ = self.init_database_and_tables()
+            if ok:
+                self._schema_verified = True
+            return ok
+        except Exception as exc:
+            logger.warning(f"Aviso al auto-verificar esquema MySQL: {exc}")
+            return False
 
     def get_connection(self, include_db: bool = True, max_retries: int = 3, retry_delay: float = 0.5):
         """
@@ -202,24 +223,25 @@ class MySQLManager:
 
                 # Asegurar columna backup_path si la tabla ya existía previamente
                 try:
-                    cur.execute("""
-                        SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS 
-                        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'auditoria_movimientos_archivos' AND COLUMN_NAME = 'backup_path'
-                    """, (self.database,))
-                    res_col = cur.fetchone()
-                    count_val = res_col.get("cnt") if isinstance(res_col, dict) else (res_col[0] if res_col else 0)
-                    if count_val == 0:
-                        cur.execute("ALTER TABLE `auditoria_movimientos_archivos` ADD COLUMN `backup_path` TEXT NULL")
+                    cur.execute("ALTER TABLE `auditoria_movimientos_archivos` ADD COLUMN `backup_path` TEXT NULL")
+                except pymysql.err.OperationalError as op_err:
+                    if op_err.args and op_err.args[0] == 1060:
+                        pass  # Ya existe (Duplicate column name)
+                    else:
+                        logger.warning(f"Aviso verificando/migrando columna backup_path en MySQL: {op_err}")
                 except Exception as col_exc:
                     logger.warning(f"Aviso verificando/migrando columna backup_path en MySQL: {col_exc}")
 
             conn.close()
+            self._schema_verified = True
             return True, f"Base de datos '{self.database}' y las 5 tablas oficiales verificadas/creadas."
         except Exception as e:
             return False, f"Error al inicializar tablas en MySQL: {str(e)}"
 
     def crear_ejecucion_lote(self, tipo_ejecucion: str, detalles: Optional[Dict[str, Any]] = None) -> int:
         """Abre un nuevo lote de ejecución en `ejecuciones_lotes` y retorna su ID."""
+        if not getattr(self, "_schema_verified", False):
+            self.ensure_schema()
         conn = self.get_connection(include_db=True)
         try:
             with conn.cursor() as cur:
@@ -445,12 +467,50 @@ class MySQLManager:
                     )
                     for m in movimientos
                 ]
-                cur.executemany("""
-                    INSERT INTO `auditoria_movimientos_archivos` (
-                        `ejecucion_id`, `carpeta_uuid`, `tipo_accion`,
-                        `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`, `backup_path`
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, vals)
+                try:
+                    cur.executemany("""
+                        INSERT INTO `auditoria_movimientos_archivos` (
+                            `ejecucion_id`, `carpeta_uuid`, `tipo_accion`,
+                            `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`, `backup_path`
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, vals)
+                except (pymysql.err.OperationalError, pymysql.err.ProgrammingError) as db_err:
+                    err_code = db_err.args[0] if (db_err.args and isinstance(db_err.args[0], int)) else None
+                    err_str = str(db_err)
+                    # 1054: Unknown column 'backup_path' in 'field list'
+                    if err_code == 1054 or "backup_path" in err_str:
+                        logger.warning("Detectada ausencia de columna 'backup_path' en 'auditoria_movimientos_archivos'. Migrando en caliente...")
+                        migrated = False
+                        try:
+                            cur.execute("ALTER TABLE `auditoria_movimientos_archivos` ADD COLUMN `backup_path` TEXT NULL")
+                            migrated = True
+                        except pymysql.err.OperationalError as op_err:
+                            if op_err.args and op_err.args[0] == 1060:
+                                migrated = True
+                            else:
+                                logger.warning(f"No se pudo ejecutar ALTER TABLE: {op_err}")
+                        except Exception as alt_exc:
+                            logger.warning(f"No se pudo ejecutar ALTER TABLE: {alt_exc}")
+
+                        if migrated:
+                            cur.executemany("""
+                                INSERT INTO `auditoria_movimientos_archivos` (
+                                    `ejecucion_id`, `carpeta_uuid`, `tipo_accion`,
+                                    `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`, `backup_path`
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, vals)
+                        else:
+                            # Fallback seguro: insertar sin backup_path para garantizar trazabilidad sin abortar la operación
+                            logger.info("Insertando movimientos sin 'backup_path' para asegurar trazabilidad...")
+                            vals_no_backup = [v[:-1] for v in vals]
+                            cur.executemany("""
+                                INSERT INTO `auditoria_movimientos_archivos` (
+                                    `ejecucion_id`, `carpeta_uuid`, `tipo_accion`,
+                                    `nombre_anterior`, `nombre_nuevo`, `ruta_anterior`, `ruta_nueva`, `cantidad_paginas`
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, vals_no_backup)
+                    else:
+                        raise
         finally:
             conn.close()
 

@@ -73,6 +73,11 @@ class FolderOCRService:
         self._op_lock = threading.RLock()
         self.current_operation: Optional[str] = None
         self.results_data: List[Dict[str, Any]] = []
+        try:
+            if self.mysql and getattr(self.mysql, "enabled", False):
+                self.mysql.ensure_schema()
+        except Exception:
+            pass
 
     def reload_settings(self) -> Dict[str, Any]:
         self.settings = SettingsManager.load()
@@ -84,6 +89,11 @@ class FolderOCRService:
             database=str(self.settings.get("mysql_database", "trazabilidad_selloslibros")),
             enabled=bool(self.settings.get("mysql_enabled", True))
         )
+        try:
+            if self.mysql and getattr(self.mysql, "enabled", False):
+                self.mysql.ensure_schema()
+        except Exception:
+            pass
         return self.settings
 
     @staticmethod

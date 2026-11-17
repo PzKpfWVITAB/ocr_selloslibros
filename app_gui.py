@@ -2651,6 +2651,11 @@ class OCRLibrosApp(tk.Tk):
         self._configure_styles()
         self.service = FolderOCRService()
         self.mysql_manager = MySQLManager(self.service.settings)
+        try:
+            if self.mysql_manager and self.mysql_manager.enabled:
+                self.mysql_manager.ensure_schema()
+        except Exception:
+            pass
         self.is_processing = False
         self.is_busy = False
         self.stop_requested = False
