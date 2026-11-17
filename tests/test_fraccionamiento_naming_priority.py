@@ -28,6 +28,19 @@ class TestFraccionamientoNamingPriority(unittest.TestCase):
         res = ClaudeVisionEngine.extract_specific_fraccionamiento(text)
         self.assertEqual(res, "FRACCIONAMIENTO_SOLIDARIDAD")
 
+    def test_extract_specific_fraccionamiento_3_de_mayo_del_2004(self):
+        # Caso reportado por el usuario: el conector 'DEL' o año '2004/2005' nunca debe quedar dentro del fraccionamiento
+        text1 = "LIBRO 238 AUXILIAR... FRACCIONAMIENTO 3 DE MAYO DEL 2004"
+        self.assertEqual(
+            ClaudeVisionEngine.extract_specific_fraccionamiento(text1),
+            "FRACCIONAMIENTO_3_DE_MAYO"
+        )
+        text2 = "FRACCIONAMIENTO 5 DE MAYO DEL 2005"
+        self.assertEqual(
+            ClaudeVisionEngine.extract_specific_fraccionamiento(text2),
+            "FRACCIONAMIENTO_5_DE_MAYO"
+        )
+
     def test_extract_generic_only_returns_none(self):
         text_generic = (
             "AUTORIZA EL LIBRO SEGUNDO AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS "
@@ -136,6 +149,39 @@ class TestFraccionamientoNamingPriority(unittest.TestCase):
             anio=ocr_final["anio"]
         )
         self.assertEqual(sugerido, "01_00_173_AUXILIAR_00_FRACCIONAMIENTO_SAN_FERNANDO_1997")
+
+    def test_3_de_mayo_normalizes_and_coincide_total(self):
+        # Carpeta física en disco del usuario: 01_01_238_AUXILIAR_00_FRACCIONAMIENTO_3_DE_MAYO_2004
+        folder_data = FolderParser.parse("01_01_238_AUXILIAR_00_FRACCIONAMIENTO_3_DE_MAYO_2004")
+        
+        # Simular que el texto traía 'FRACCIONAMIENTO 3 DE MAYO DEL 2004'
+        detected_fracc = ClaudeVisionEngine.normalize_fraccionamiento_label("FRACCIONAMIENTO_3_DE_MAYO_DEL")
+        self.assertEqual(detected_fracc, "FRACCIONAMIENTO_3_DE_MAYO")
+
+        ocr_final = {
+            "seccion": 1,
+            "libro": 238,
+            "tomo": "AUXILIAR",
+            "volumen": "00",
+            "fraccionamiento": detected_fracc,
+            "anio": 2004,
+            "evidencias_globales": []
+        }
+
+        comp = FolderComparator.compare(folder_data, ocr_final)
+        self.assertEqual(comp["veredicto"], "COINCIDE_TOTAL")
+        self.assertEqual(len(comp["discrepancias"]), 0)
+
+        sugerido = FileOperations.build_clean_folder_code(
+            delegacion=folder_data["delegacion"],
+            seccion=ocr_final["seccion"],
+            libro=ocr_final["libro"],
+            tomo=ocr_final["tomo"],
+            volumen=ocr_final["volumen"],
+            fraccionamiento=ocr_final["fraccionamiento"],
+            anio=ocr_final["anio"]
+        )
+        self.assertEqual(sugerido, "01_01_238_AUXILIAR_00_FRACCIONAMIENTO_3_DE_MAYO_2004")
 
 
 if __name__ == "__main__":

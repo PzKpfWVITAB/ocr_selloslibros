@@ -59,7 +59,8 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
    - REGLA CRÍTICA DE PRIORIDAD PARA FRACCIONAMIENTOS:
      * Si el documento menciona la categoría general "FRACCIONAMIENTOS Y COLONIAS", "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS", "INDICE DE COLONIAS" o "COLONIAS", PERO en cualquier parte del texto se especifica el NOMBRE CONCRETO del fraccionamiento (ej. "...DEL FRACCIONAMIENTO SAN FERNANDO...", "...FRACCIONAMIENTO SOLIDARIDAD...", "...PREDIO DENOMINADO..."):
        - ESTÁ ESTRICTAMENTE PROHIBIDO usar únicamente "FRACCIONAMIENTOS_Y_COLONIAS" o "COLONIAS".
-       - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_PATRIA_NUEVA").
+       - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_3_DE_MAYO").
+       - REGLA CRÍTICA DE LIMPIEZA: NUNCA incluyas conectores como "DEL", "DE", "PARA EL AÑO" ni el año dentro de "fraccionamiento" (ej. si el documento dice "FRACCIONAMIENTO 3 DE MAYO DEL 2004" o "FRACCIONAMIENTO 5 DE MAYO DEL 2005", el fraccionamiento es "FRACCIONAMIENTO_3_DE_MAYO" o "FRACCIONAMIENTO_5_DE_MAYO", NUNCA "FRACCIONAMIENTO_3_DE_MAYO_DEL" ni "FRACCIONAMIENTO_3_DE_MAYO_DEL_2004").
        - El formato OBLIGATORIO es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
        - ÚNICAMENTE debes usar "FRACCIONAMIENTOS_Y_COLONIAS" si en TODO el documento no existe ninguna mención de un fraccionamiento, colonia o predio en particular.
    - Casos y Formatos:
@@ -515,7 +516,19 @@ class ClaudeVisionEngine:
             s = re.split(sw, s, flags=re.IGNORECASE)[0].strip()
         s = re.sub(r'^[\s,.;:"\'\-_]+|[\s,.;:"\'\-_]+$', '', s)
         s = re.sub(r'[^A-Z0-9]+', '_', s).strip('_')
-        s = re.sub(r'_(?:19\d{2}|20\d{2})$', '', s)
+
+        # Limpieza iterativa de años y conectores finales (ej. _2004, _DEL_ANO, _DEL, _DE, _PARA, etc.)
+        while True:
+            old_s = s
+            # Quitar año final de 4 dígitos (ej. _2004, _1997)
+            s = re.sub(r'_(?:19\d{2}|20\d{2})$', '', s)
+            # Quitar referencias de año o tiempo al final (ej. _DEL_ANO, _DEL_ANIO, _A_O, _ANO, _ANIO, _ANOS)
+            s = re.sub(r'_(?:DEL|DE|PARA|EN|AL)?_?(?:ANO|ANIO|A_O|ANOS|ANIOS)$', '', s)
+            # Quitar conectores o preposiciones sueltas al final (ej. _DEL, _DE, _PARA_EL, _PARA, _EN_EL, _EN, _AL, _A, _CON, _POR, _Y, _O)
+            s = re.sub(r'_(?:PARA_EL|PARA_LA|EN_EL|EN_LA|DE_EL|DE_LA|DE_LOS|DE_LAS|DEL|DE|PARA|EN|AL|A|CON|POR|Y|O)$', '', s)
+            if s == old_s:
+                break
+
         return s
 
     @classmethod
@@ -540,12 +553,12 @@ class ClaudeVisionEngine:
         s = TextNormalizer.strip_accents(str(val).strip().upper())
         if s in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "00", "0", "NULL", "NONE"]:
             return s
-        s = cls.clean_fraccionamiento_name(s)
         if s.startswith("FRACCIONAMIENTO_"):
-            return s
-        if s.startswith("FRACCION_"):
-            return f"FRACCIONAMIENTO_{s[9:]}"
-        return f"FRACCIONAMIENTO_{s}"
+            s = s[16:]
+        elif s.startswith("FRACCION_"):
+            s = s[9:]
+        cleaned_body = cls.clean_fraccionamiento_name(s)
+        return f"FRACCIONAMIENTO_{cleaned_body}"
 
     @staticmethod
     def _is_negative_or_absence_line(line: str) -> bool:
