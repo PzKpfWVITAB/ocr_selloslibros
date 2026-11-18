@@ -23,6 +23,7 @@ from src.service import FolderOCRService
 from src.core.settings_manager import SettingsManager, AVAILABLE_MODELS
 from src.core.claude_engine import ClaudeVisionEngine
 from src.parsers.folder_parser import FolderParser
+from src.matcher.comparator import FolderComparator
 from src.core.file_operations import FileOperations
 from src.database.mysql_manager import MySQLManager
 from src.core.folder_renamer_by_pdf import FolderRenamerByFirstPdf
@@ -1493,6 +1494,12 @@ class ManualEditDialog(tk.Toplevel):
 
         self.res["comparacion"] = FolderComparator.compare(self.res.get("folder_data", {}), ocr)
         self.res["needs_rename"] = True
+        try:
+            fp = self.res.get("folder_path")
+            if fp and hasattr(self.parent_app, "service") and hasattr(self.parent_app.service, "cache"):
+                self.parent_app.service.cache.save_folder_diagnosis(Path(fp), self.res)
+        except Exception as e:
+            logger.debug(f"No se pudo persistir edición manual en caché de carpeta: {e}")
 
     def _save_code(self):
         new_code = self.preview_code_var.get().strip()

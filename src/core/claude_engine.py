@@ -783,72 +783,72 @@ class ClaudeVisionEngine:
             if (doc.get("tomo") == "AUXILIAR" or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
                 repaired["es_auxiliar"] = False
 
-            # Recuperar el tomo real desde las evidencias afirmativas o desde el volumen desplazado
-            restored_tomo: Optional[int] = None
-            for ev in evidencias:
-                s_ev = str(ev).strip()
-                if cls._is_negative_or_absence_line(s_ev):
-                    continue
-                ev_up = TextNormalizer.strip_accents(s_ev.upper())
+                # Recuperar el tomo real desde las evidencias afirmativas o desde el volumen desplazado
+                restored_tomo: Optional[int] = None
+                for ev in evidencias:
+                    s_ev = str(ev).strip()
+                    if cls._is_negative_or_absence_line(s_ev):
+                        continue
+                    ev_up = TextNormalizer.strip_accents(s_ev.upper())
 
-                # Caso A: '-> tomo=3'
-                m_tom = re.search(r"TOMO\s*=\s*(\d+)", ev_up)
-                if m_tom:
-                    restored_tomo = int(m_tom.group(1))
-                    break
-
-                # Caso B: 'TOMO III', 'TOMO UNO', 'TOMO 2', 'TOMO II (DOS)', etc.
-                m_tom_tok = re.search(
-                    r"\bTOMO\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?([A-Z0-9#]+(?:\s*\([A-Z0-9]+\))?)",
-                    ev_up
-                )
-                if m_tom_tok:
-                    parsed_t = TextNormalizer.parse_number_or_word(m_tom_tok.group(1))
-                    if parsed_t is not None:
-                        restored_tomo = parsed_t
+                    # Caso A: '-> tomo=3'
+                    m_tom = re.search(r"TOMO\s*=\s*(\d+)", ev_up)
+                    if m_tom:
+                        restored_tomo = int(m_tom.group(1))
                         break
 
-            # Si también existe transcripcion_literal y aún no se halló tomo, buscar ahí
-            if restored_tomo is None and transcripcion_literal:
-                trans_up = TextNormalizer.strip_accents(transcripcion_literal.upper())
-                m_tom_tr = re.search(
-                    r"\bTOMO\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?([A-Z0-9#]+(?:\s*\([A-Z0-9]+\))?)",
-                    trans_up
+                    # Caso B: 'TOMO III', 'TOMO UNO', 'TOMO 2', 'TOMO II (DOS)', etc.
+                    m_tom_tok = re.search(
+                        r"\bTOMO\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?([A-Z0-9#]+(?:\s*\([A-Z0-9]+\))?)",
+                        ev_up
+                    )
+                    if m_tom_tok:
+                        parsed_t = TextNormalizer.parse_number_or_word(m_tom_tok.group(1))
+                        if parsed_t is not None:
+                            restored_tomo = parsed_t
+                            break
+
+                # Si también existe transcripcion_literal y aún no se halló tomo, buscar ahí
+                if restored_tomo is None and transcripcion_literal:
+                    trans_up = TextNormalizer.strip_accents(transcripcion_literal.upper())
+                    m_tom_tr = re.search(
+                        r"\bTOMO\s+(?:(?:NUMERO|NUERO|NRO\.?|NUM\.?|NO\.?)\s+)?([A-Z0-9#]+(?:\s*\([A-Z0-9]+\))?)",
+                        trans_up
+                    )
+                    if m_tom_tr:
+                        restored_tomo = TextNormalizer.parse_number_or_word(m_tom_tr.group(1))
+
+                has_positive_vol = any(
+                    "VOLUMEN" in TextNormalizer.strip_accents(str(ev).upper())
+                    and not cls._is_negative_or_absence_line(str(ev))
+                    for ev in evidencias
                 )
-                if m_tom_tr:
-                    restored_tomo = TextNormalizer.parse_number_or_word(m_tom_tr.group(1))
 
-            has_positive_vol = any(
-                "VOLUMEN" in TextNormalizer.strip_accents(str(ev).upper())
-                and not cls._is_negative_or_absence_line(str(ev))
-                for ev in evidencias
-            )
-
-            if restored_tomo is not None:
-                repaired["tomo"] = restored_tomo
-                if not has_positive_vol and repaired.get("volumen") == restored_tomo:
+                if restored_tomo is not None:
+                    repaired["tomo"] = restored_tomo
+                    if not has_positive_vol and repaired.get("volumen") == restored_tomo:
+                        repaired["volumen"] = None
+                elif isinstance(repaired.get("volumen"), int) and not has_positive_vol:
+                    repaired["tomo"] = repaired["volumen"]
                     repaired["volumen"] = None
-            elif isinstance(repaired.get("volumen"), int) and not has_positive_vol:
-                repaired["tomo"] = repaired["volumen"]
-                repaired["volumen"] = None
-            elif repaired.get("tomo") == "AUXILIAR":
-                repaired["tomo"] = None
+                elif repaired.get("tomo") == "AUXILIAR":
+                    repaired["tomo"] = None
 
-            if repaired.get("libro") == "AUXILIAR":
-                repaired["libro"] = None
+                if repaired.get("libro") == "AUXILIAR":
+                    repaired["libro"] = None
 
-            # Limpiar de evidencias los comentarios negativos sobre auxiliar que causaban confusión
-            cleaned_evidencias = [
-                ev for ev in evidencias
-                if not (
-                    cls._is_negative_or_absence_line(str(ev))
-                    and "AUXILIAR" in TextNormalizer.strip_accents(str(ev).upper())
-                )
-            ]
-            if cleaned_evidencias:
-                repaired["evidencias"] = cleaned_evidencias
+                # Limpiar de evidencias los comentarios negativos sobre auxiliar que causaban confusión
+                cleaned_evidencias = [
+                    ev for ev in evidencias
+                    if not (
+                        cls._is_negative_or_absence_line(str(ev))
+                        and "AUXILIAR" in TextNormalizer.strip_accents(str(ev).upper())
+                    )
+                ]
+                if cleaned_evidencias:
+                    repaired["evidencias"] = cleaned_evidencias
 
-            changed = True
+                changed = True
 
         # --- REGLA 2: Prioridad de Fraccionamientos Específicos sobre genéricos ---
         curr_fracc = repaired.get("fraccionamiento")
