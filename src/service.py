@@ -315,11 +315,41 @@ class FolderOCRService:
         folder_p = Path(folder_path)
         folder_data = FolderParser.parse(folder_p.name)
 
+        clean_current_code = FileOperations.strip_suffix_after_year(folder_p.name, folder_data)
+
         # 0. Comprobar si ya existe un diagnóstico en el caché persistente en disco (0 tokens)
         if not force_claude_on_missing_caratula and hasattr(self, "cache") and self.cache:
             try:
                 cached_diag = self.cache.get_folder_diagnosis(folder_p)
                 if cached_diag is not None:
+                    docs_detail = cached_diag.get("documents_detail", {})
+                    ocr_cons = cached_diag.get("ocr_consolidado", {})
+                    ev_glob = ocr_cons.get("evidencias_globales", []) if isinstance(ocr_cons, dict) else []
+                    has_manual_edit = any("Corrección manual" in str(e) for e in ev_glob)
+
+                    if not has_manual_edit and isinstance(docs_detail, dict) and "CARATULA" in docs_detail:
+                        car_doc = docs_detail["CARATULA"]
+                        if isinstance(car_doc, dict) and any(k in car_doc for k in ("libro", "tomo", "seccion", "fraccionamiento", "anio")):
+                            repaired_car, car_changed = ClaudeVisionEngine.sanitize_cached_doc(car_doc)
+                            docs_detail["CARATULA"] = repaired_car
+                            new_ocr_final = FolderComparator.synthesize_detections(docs_detail)
+                            deleg_fija = folder_data.get("delegacion") or "01"
+                            new_code = FileOperations.build_clean_folder_code(
+                                delegacion=deleg_fija,
+                                seccion=new_ocr_final.get("seccion"),
+                                libro=new_ocr_final.get("libro"),
+                                tomo=new_ocr_final.get("tomo"),
+                                volumen=new_ocr_final.get("volumen"),
+                                fraccionamiento=new_ocr_final.get("fraccionamiento"),
+                                anio=new_ocr_final.get("anio"),
+                            )
+                            if car_changed or new_code != cached_diag.get("codigo_base_sugerido"):
+                                cached_diag["ocr_consolidado"] = new_ocr_final
+                                cached_diag["comparacion"] = FolderComparator.compare(folder_data, new_ocr_final)
+                                cached_diag["codigo_base_sugerido"] = new_code
+                                cached_diag["needs_rename"] = (clean_current_code != new_code) or (folder_p.name != new_code)
+                                self.cache.save_folder_diagnosis(folder_p, cached_diag)
+
                     cached_diag["from_folder_cache"] = True
                     cached_diag["folder_path"] = str(folder_p)
                     cached_diag["folder_name"] = folder_p.name
@@ -327,8 +357,6 @@ class FolderOCRService:
                     return cached_diag
             except Exception as cache_err:
                 logger.warning(f"Aviso al consultar caché persistente de carpeta: {cache_err}")
-
-        clean_current_code = FileOperations.strip_suffix_after_year(folder_p.name, folder_data)
 
         # Paso 2A: Chequeo estricto de estructura de 7 posiciones (0 tokens)
         struct = self.check_folder_structure(folder_p)
