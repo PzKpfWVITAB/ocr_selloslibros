@@ -30,7 +30,7 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
        - "seccion" DEBE SER EL NÚMERO CORRESPONDIENTE (1, 2, 3, 4 o 5).
        - ESTÁ ESTRICTAMENTE PROHIBIDO poner seccion=null o 00 pensando que la palabra AUXILIAR anula la sección numerada.
        - "AUXILIAR" ocupa la posición de Tomo (o Libro si no tiene número), pero "seccion" CONSERVA SU NÚMERO (ej. seccion=1).
-   - Si el acta de apertura dice "SECCION DE CREDITO AGRICOLA", "SECCION DE ACTOS Y CONTRATOS", "DOCUMENTOS PRIVADOS", "LIBRO AUXILIAR", etc. (sin decir Sección Primera, Segunda, Tercera, Cuarta o Quinta), "seccion" DEBE SER null (que equivale a 00), y ese nombre alfanumérico ("CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "DOCUMENTOS_PRIVADOS", "AUXILIAR") DEBE colocarse en el campo "tomo".
+   - Si el acta de apertura dice "SECCION DE CREDITO AGRICOLA", "SECCION DE ACTOS Y CONTRATOS", "DOCUMENTOS PRIVADOS", "ADQUISICIONES DE GOBIERNO", "LIBRO AUXILIAR", etc. (sin decir Sección Primera, Segunda, Tercera, Cuarta o Quinta), "seccion" DEBE SER null (que equivale a 00), y ese nombre alfanumérico ("CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "DOCUMENTOS_PRIVADOS", "ADQUISICIONES_DE_GOBIERNO", "AUXILIAR", "AUXILIAR_ACTOS_Y_CONTRATOS", "AUXILIAR_CREDITO_AGRICOLA", "AUXILIAR_DOCUMENTOS_PRIVADOS") DEBE colocarse en el campo "tomo".
    - REGLA CRÍTICA DE FALSOS POSITIVOS:
      La institución se llama "REGISTRO PÚBLICO DE LA PROPIEDAD Y DE COMERCIO". NUNCA asignes seccion=1 ni seccion=2 solo por el nombre de la institución.
 
@@ -40,55 +40,52 @@ REGLAS ESTRICTAS DE EXTRACCIÓN CAMPO POR CAMPO:
    - REGLA DE LIBRO CON NÚMERO + AUXILIAR:
      * Si el documento tiene un número de libro Y además dice "AUXILIAR" (ejemplo: "LIBRO SEGUNDO AUXILIAR DEL INDICE DE COLONIAS" o "LIBRO NUMERO 02 VOLUMEN I AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS" o "LIBRO NUMERO 100 AUXILIAR"), entonces:
        - "libro" = el número entero del libro (ej. 2, 100).
-       - "tomo" = "AUXILIAR" (porque AUXILIAR ocupa la posición de Tomo cuando ya existe un número de libro).
+       - "tomo" = "AUXILIAR" (o la combinación auxiliar correspondiente como "AUXILIAR_ACTOS_Y_CONTRATOS", "AUXILIAR_CREDITO_AGRICOLA", "AUXILIAR_DOCUMENTOS_PRIVADOS", o "AUXILIAR_<NUMERO>" si dice explícitamente "AUX. 25").
      * Solo coloca "libro": "AUXILIAR" si el documento dice "LIBRO AUXILIAR" sin ningún número de libro.
 
-3. "tomo" (entero, o cadena alfanumérica como "AUXILIAR", "CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "DOCUMENTOS_PRIVADOS", o null):
+3. "tomo" (entero, o cadena alfanumérica permitida en Tomo, o null):
+   - Valores alfanuméricos permitidos en "tomo":
+     * "AUXILIAR"
+     * "AUXILIAR_<NUMERO>" (ÚNICAMENTE cuando en raras ocasiones dice explícitamente algo como "AUX. 25" indicando que ese es el número específico de auxiliar; nunca tomes números de fojas, libros o años).
+     * "ACTOS_Y_CONTRATOS"
+     * "AUXILIAR_ACTOS_Y_CONTRATOS" (cuando el libro es Auxiliar Y de Actos y Contratos)
+     * "CREDITO_AGRICOLA"
+     * "AUXILIAR_CREDITO_AGRICOLA" (cuando el libro es Auxiliar Y de Crédito Agrícola)
+     * "DOCUMENTOS_PRIVADOS"
+     * "AUXILIAR_DOCUMENTOS_PRIVADOS" (cuando el libro es Auxiliar Y de Documentos Privados)
+     * "ADQUISICIONES_DE_GOBIERNO"
    - Caso A (Tomo numérico normal): Si el documento menciona un Tomo numérico (ej. "TOMO I", "TOMO 2", "TOMO II (DOS)"), devuelve el número entero (1, 2).
-   - Caso B (Libro AUXILIAR con número de libro):
-     * Si el documento dice "LIBRO [N] AUXILIAR..." (ej. "LIBRO 1 UNO AUXILIAR PARA LLEVAR EL ORIGINAL DE ACTOS Y CONTRATOS", "LIBRO SEGUNDO AUXILIAR DEL INDICE DE COLONIAS", "LIBRO NUMERO 02 VOLUMEN I AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS"):
-       - "libro" = N (ej. 1, 2)
-       - "tomo" = "AUXILIAR"
-       - Y si además menciona la materia/categoría del libro auxiliar (como "ACTOS Y CONTRATOS", "CREDITO AGRICOLA", "DOCUMENTOS PRIVADOS", "COLONIAS", "FRACCIONAMIENTOS Y COLONIAS"), coloca esa materia en "fraccionamiento" (ej. "ACTOS_Y_CONTRATOS", "DOCUMENTOS_PRIVADOS", "COLONIAS", "FRACCIONAMIENTOS_Y_COLONIAS").
-   - Caso C (Sección o categoría alfanumérica cuando el libro NO es AUXILIAR):
-     * Como la posición de Sección solo acepta números, cuando el libro NO es Auxiliar y pertenece a una sección o materia alfanumérica que no es fraccionamiento ("CREDITO AGRICOLA", "ACTOS Y CONTRATOS", "DOCUMENTOS PRIVADOS"), colócala en "tomo":
-       - "LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE CREDITO AGRICOLA" -> "seccion": null, "libro": 2, "tomo": "CREDITO_AGRICOLA", "fraccionamiento": null
-       - "LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE ACTOS Y CONTRATOS" -> "seccion": null, "libro": 2, "tomo": "ACTOS_Y_CONTRATOS", "fraccionamiento": null
-       - "LIBRO NUMERO 1 UNO DE DOCUMENTOS PRIVADOS" (o "SECCION DE DOCUMENTOS PRIVADOS") -> "libro": 1, "tomo": "DOCUMENTOS_PRIVADOS", "fraccionamiento": null
-   - Si no hay tomo numérico ni categoría alfanumérica para la posición de tomo, devuelve null.
+   - Caso B (Libro AUXILIAR con o sin materia de Tomo):
+     * "LIBRO 1 UNO AUXILIAR PARA LLEVAR EL ORIGINAL DE ACTOS Y CONTRATOS" -> "libro": 1, "tomo": "AUXILIAR_ACTOS_Y_CONTRATOS", "fraccionamiento": null
+     * "LIBRO 1 AUXILIAR DE CREDITO AGRICOLA" -> "libro": 1, "tomo": "AUXILIAR_CREDITO_AGRICOLA", "fraccionamiento": null
+     * "LIBRO 1 AUXILIAR DE DOCUMENTOS PRIVADOS" -> "libro": 1, "tomo": "AUXILIAR_DOCUMENTOS_PRIVADOS", "fraccionamiento": null
+     * "LIBRO NUMERO DOS... SEGUNDO AUXILIAR... ESCRITURAS DE SOCIEDADES Y PODERES" -> "libro": 2, "tomo": "AUXILIAR", "fraccionamiento": null (NUNCA pongas "SOCIEDADES Y PODERES" en tomo ni en fraccionamiento).
+   - Caso C (Categoría en Tomo cuando el libro NO es AUXILIAR):
+     * "LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE CREDITO AGRICOLA" -> "seccion": null, "libro": 2, "tomo": "CREDITO_AGRICOLA", "fraccionamiento": null
+     * "LIBRO NUMERO 2 DOS PARA LLEVAR EL ORIGINAL DE LA SECCION DE ACTOS Y CONTRATOS" -> "seccion": null, "libro": 2, "tomo": "ACTOS_Y_CONTRATOS", "fraccionamiento": null
+     * "LIBRO NUMERO 1 UNO DE DOCUMENTOS PRIVADOS" -> "libro": 1, "tomo": "DOCUMENTOS_PRIVADOS", "fraccionamiento": null
+     * "LIBRO DE ADQUISICIONES DE GOBIERNO" -> "tomo": "ADQUISICIONES_DE_GOBIERNO", "fraccionamiento": null
+   - Si no hay tomo numérico ni ninguna de las categorías permitidas arriba, devuelve null.
 
 4. "volumen" (entero o null):
    - Si el documento especifica un número de Volumen (ej. "VOLUMEN 1", "VOLUMEN I", "VOL. 2"), conviértelo a número entero (1, 2).
    - Si no se menciona Volumen, devuelve null.
 
 5. "fraccionamiento" (cadena en mayúsculas con guiones bajos, o null):
-   - REGLA CRÍTICA DE PRIORIDAD PARA FRACCIONAMIENTOS:
-     * Si el documento menciona la categoría general "FRACCIONAMIENTOS Y COLONIAS", "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS", "INDICE DE COLONIAS" o "COLONIAS", PERO en cualquier parte del texto se especifica el NOMBRE CONCRETO del fraccionamiento (ej. "...DEL FRACCIONAMIENTO SAN FERNANDO...", "...FRACCIONAMIENTO SOLIDARIDAD...", "...PREDIO DENOMINADO..."):
-       - ESTÁ ESTRICTAMENTE PROHIBIDO usar únicamente "FRACCIONAMIENTOS_Y_COLONIAS" o "COLONIAS".
-       - DEBES extraer el nombre específico del fraccionamiento y anteponer SIEMPRE "FRACCIONAMIENTO_" (ej. "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_SOLIDARIDAD", "FRACCIONAMIENTO_3_DE_MAYO").
-       - REGLA CRÍTICA DE LIMPIEZA: NUNCA incluyas conectores como "DEL", "DE", "PARA EL AÑO" ni el año dentro de "fraccionamiento" (ej. si el documento dice "FRACCIONAMIENTO 3 DE MAYO DEL 2004" o "FRACCIONAMIENTO 5 DE MAYO DEL 2005", el fraccionamiento es "FRACCIONAMIENTO_3_DE_MAYO" o "FRACCIONAMIENTO_5_DE_MAYO", NUNCA "FRACCIONAMIENTO_3_DE_MAYO_DEL" ni "FRACCIONAMIENTO_3_DE_MAYO_DEL_2004").
-       - PROHIBICIÓN ABSOLUTA DE COMENTARIOS O FRASES EXPLICATIVAS:
-         ESTÁ ESTRICTAMENTE PROHIBIDO incluir comentarios, notas, explicaciones o palabras como "CONCRETO", "TEXTO_VISIBLE", "PARECE_REFERIRSE", "NO_SE_ESPECIFICA", "SIN_NOMBRE", "DETECTADO", "ENCONTRADO" dentro de "fraccionamiento".
-         Tus notas u observaciones deben ir EXCLUSIVAMENTE en el campo 'comentarios_ia'.
-         Si en el documento no se menciona explícitamente el nombre propio de una colonia o fraccionamiento, DEBES proponer obligatoriamente "FRACCIONAMIENTOS_Y_COLONIAS" (si es libro de fraccionamientos) o null (si es de otra materia).
-       - Si el documento dice únicamente "AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS" o "FRACCIONAMIENTOS Y COLONIAS" y NO menciona explícitamente el nombre de un fraccionamiento, colonia o predio específico, DEBES proponer obligatoriamente "FRACCIONAMIENTOS_Y_COLONIAS".
-       - El formato OBLIGATORIO para fraccionamientos específicos es "FRACCIONAMIENTO_<NOMBRE_DE_FRACCIONAMIENTO>".
-       - ÚNICAMENTE debes usar "FRACCIONAMIENTOS_Y_COLONIAS" si en TODO el documento no existe ninguna mención de un fraccionamiento, colonia o predio en particular.
-   - Casos y Formatos:
-     a) Cuando el libro está dedicado a un Fraccionamiento, Colonia o Predio específico:
-        * Formato siempre en mayúsculas con prefijo: "FRACCIONAMIENTO_<NOMBRE>"
-        * "FRACCIONAMIENTO SAN FERNANDO" -> "FRACCIONAMIENTO_SAN_FERNANDO"
-        * "FRACCIONAMIENTO SOLIDARIDAD" -> "FRACCIONAMIENTO_SOLIDARIDAD"
-        * "FRACCIONAMIENTO PATRIA NUEVA" -> "FRACCIONAMIENTO_PATRIA_NUEVA"
-        * "FRACCIONAMIENTO RESIDENCIAL HACIENDA" -> "FRACCIONAMIENTO_RESIDENCIAL_HACIENDA"
-        * "FRACCIONAMIENTO LOMAS DEL SUR" -> "FRACCIONAMIENTO_LOMAS_DEL_SUR"
-        * "COLONIA LAS FLORES" -> "FRACCIONAMIENTO_LAS_FLORES"
-        * "PREDIO SAN CARLOS" -> "FRACCIONAMIENTO_SAN_CARLOS"
-        * Si NO menciona ningún fraccionamiento específico pero dice "INDICE DE COLONIAS" o "COLONIAS" -> "COLONIAS"
-        * Si NO menciona ningún fraccionamiento específico pero dice "FRACCIONAMIENTOS Y COLONIAS" -> "FRACCIONAMIENTOS_Y_COLONIAS"
-     b) Cuando la posición de "tomo" ya está ocupada por "AUXILIAR" y el libro auxiliar especifica una materia como "ACTOS Y CONTRATOS", "CREDITO AGRICOLA" o "DOCUMENTOS PRIVADOS":
-        * Ejemplo: "LIBRO 1 UNO AUXILIAR PARA LLEVAR EL ORIGINAL DE ACTOS Y CONTRATOS" -> "libro": 1, "tomo": "AUXILIAR", "fraccionamiento": "ACTOS_Y_CONTRATOS".
-   - Si el libro NO es AUXILIAR, entonces "CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS" y "DOCUMENTOS_PRIVADOS" van en "tomo" y "fraccionamiento" debe ser null.
+   - REGLA CRÍTICA DE EXCLUSIVIDAD PARA FRACCIONAMIENTO (POSICIÓN 6):
+     * Este campo es EXCLUSIVAMENTE para Fraccionamientos, Colonias o CORETT.
+     * Si el documento NO trata de Fraccionamientos, Colonias ni CORETT (por ejemplo, si trata de "Sociedades y Poderes", "Actos y Contratos", "Crédito Agrícola", "Documentos Privados", "Adquisiciones de Gobierno", "Comercio", etc.), "fraccionamiento" DEBE SER OBLIGATORIAMENTE null (que equivale a 00).
+     * ESTÁ ESTRICTAMENTE PROHIBIDO poner materias como "SOCIEDADES_Y_PODERES" o anteponer "FRACCIONAMIENTO_" a cosas que no son un fraccionamiento.
+   - Reglas de Formato cuando el documento SÍ es de Fraccionamientos, Colonias o CORETT:
+     a) Si menciona explícitamente un FRACCIONAMIENTO (ej. "FRACCIONAMIENTO SAN FERNANDO", "FRACCIONAMIENTO VILLA 24 DE JUNIO"):
+        * Lleva el prefijo "FRACCIONAMIENTO_": "FRACCIONAMIENTO_SAN_FERNANDO", "FRACCIONAMIENTO_VILLA_24_DE_JUNIO".
+     b) Si menciona explícitamente el nombre de una COLONIA (ej. "COLONIA LAS GRANJAS", "COLONIA BIENESTAR SOCIAL"):
+        * Se pone SOLO el nombre de la colonia en mayúsculas con guiones bajos SIN "FRACCIONAMIENTO_" y SIN "COLONIA_" al inicio (ej. "LAS_GRANJAS", "BIENESTAR_SOCIAL").
+     c) Si menciona "CORETT":
+        * Se pone "CORETT".
+     d) Si el libro es de "FRACCIONAMIENTOS Y COLONIAS" o "INDICE DE COLONIAS" pero NO tiene un nombre explícito de fraccionamiento ni de colonia:
+        * Se pone simplemente "FRACCIONAMIENTOS_Y_COLONIAS".
+   - REGLA CRÍTICA DE LIMPIEZA: NUNCA incluyas conectores como "DEL", "DE", "PARA EL AÑO" ni el año al final de "fraccionamiento", ni frases explicativas o comentarios de la IA.
 
 6. "anio" (entero de 4 dígitos entre 1900 y 2035, o null):
    - Es el año para el cual se autoriza el libro o en que se fecha el acta de apertura (ej. "PARA EL AÑO DE 1986 MIL NOVECIENTOS OCHENTA Y SEIS" -> 1986, "26 DE NOVIEMBRE DE MIL NOVECIENTOS OCHENTA Y TRES" -> 1983).
@@ -225,9 +222,12 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                     "tomo": {
                         "type": ["integer", "string", "null"],
                         "description": (
-                            "Número entero del Tomo (ej. 1, 2, 3 para TOMO I, II, III), o 'AUXILIAR' ÚNICAMENTE cuando el documento dice explícitamente la palabra AUXILIAR, "
-                            "o 'CREDITO_AGRICOLA' / 'ACTOS_Y_CONTRATOS' / 'DOCUMENTOS_PRIVADOS' cuando el libro NO es Auxiliar y pertenece a esa sección o materia alfanumérica. "
-                            "Si no aplica ninguno, null."
+                            "Número entero del Tomo (ej. 1, 2, 3), o una de las categorías permitidas en Tomo: "
+                            "'AUXILIAR', 'AUXILIAR_<NUMERO>' (solo si dice explícitamente AUX. <N> indicando número de auxiliar), "
+                            "'ACTOS_Y_CONTRATOS', 'AUXILIAR_ACTOS_Y_CONTRATOS', "
+                            "'CREDITO_AGRICOLA', 'AUXILIAR_CREDITO_AGRICOLA', "
+                            "'DOCUMENTOS_PRIVADOS', 'AUXILIAR_DOCUMENTOS_PRIVADOS', "
+                            "'ADQUISICIONES_DE_GOBIERNO'. Si no aplica ninguno, null."
                         ),
                     },
                     "volumen": {
@@ -237,12 +237,12 @@ STRUCTURED_OUTPUT_TOOL: Dict[str, Any] = {
                     "fraccionamiento": {
                         "type": ["string", "null"],
                         "description": (
-                            "Nombre específico del fraccionamiento con formato 'FRACCIONAMIENTO_<NOMBRE>' en mayúsculas con guiones bajos "
-                            "(ej. 'FRACCIONAMIENTO_SAN_FERNANDO', 'FRACCIONAMIENTO_SOLIDARIDAD'). "
-                            "REGLA ESTRICTA: Si el documento menciona 'FRACCIONAMIENTOS Y COLONIAS' o 'AUXILIAR DE FRACCIONAMIENTOS Y COLONIAS' pero más adelante especifica un nombre, "
-                            "SIEMPRE usar 'FRACCIONAMIENTO_<NOMBRE>' y NUNCA solo 'FRACCIONAMIENTOS_Y_COLONIAS'. "
-                            "Solo usar 'FRACCIONAMIENTOS_Y_COLONIAS' o 'COLONIAS' si no se menciona ningún fraccionamiento específico en todo el texto. "
-                            "O la materia ('ACTOS_Y_CONTRATOS', 'CREDITO_AGRICOLA', 'DOCUMENTOS_PRIVADOS') cuando 'tomo' ya está ocupado por 'AUXILIAR'. Si no aplica, null."
+                            "EXCLUSIVAMENTE para libros de Fraccionamientos, Colonias o CORETT. "
+                            "Si el documento NO es de fraccionamientos ni colonias (ej. Sociedades y Poderes, Actos y Contratos, Comercio), DEBE SER null. "
+                            "Formato: si es un fraccionamiento específico -> 'FRACCIONAMIENTO_<NOMBRE>'; "
+                            "si es una colonia específica -> solo '<NOMBRE_COLONIA>' sin prefijo; "
+                            "si es CORETT -> 'CORETT'; "
+                            "si es genérico de fraccionamientos/colonias sin nombre específico -> 'FRACCIONAMIENTOS_Y_COLONIAS'."
                         ),
                     },
                     "anio": {
@@ -479,6 +479,28 @@ class ClaudeVisionEngine:
         usage["model_used"] = resp_data.get("model", model)
         return "\n".join(text_parts), usage
 
+    VALID_TOMO_CATEGORIES = {
+        "AUXILIAR",
+        "ACTOS_Y_CONTRATOS",
+        "AUXILIAR_ACTOS_Y_CONTRATOS",
+        "CREDITO_AGRICOLA",
+        "AUXILIAR_CREDITO_AGRICOLA",
+        "DOCUMENTOS_PRIVADOS",
+        "AUXILIAR_DOCUMENTOS_PRIVADOS",
+        "ADQUISICIONES_DE_GOBIERNO",
+    }
+
+    @classmethod
+    def is_valid_tomo_category(cls, val: Any) -> bool:
+        if not val:
+            return False
+        s = str(val).strip().upper()
+        if s in cls.VALID_TOMO_CATEGORIES:
+            return True
+        if re.match(r"^AUXILIAR_\d+$", s):
+            return True
+        return False
+
     @staticmethod
     def _clean_alnum_label(val: str) -> str:
         s = TextNormalizer.strip_accents(val.strip().upper())
@@ -486,34 +508,66 @@ class ClaudeVisionEngine:
         s = re.sub(r"^SECCION\s+", "", s)
         s = re.sub(r"^INDICE\s+DE\s+", "", s)
         s = re.sub(r"^INDICE_DE_", "", s)
+        has_aux = bool(re.search(r"\bAUX(?:ILIAR|\.)?\b", s))
+        if "ADQUISICION" in s and "GOBIERNO" in s:
+            return "ADQUISICIONES_DE_GOBIERNO"
         if "ACTOS" in s and "CONTRATOS" in s:
-            return "ACTOS_Y_CONTRATOS"
+            return "AUXILIAR_ACTOS_Y_CONTRATOS" if has_aux else "ACTOS_Y_CONTRATOS"
         if "CREDITO" in s and "AGRICOLA" in s:
-            return "CREDITO_AGRICOLA"
+            return "AUXILIAR_CREDITO_AGRICOLA" if has_aux else "CREDITO_AGRICOLA"
         if "DOCUMENTO" in s and "PRIVADO" in s:
-            return "DOCUMENTOS_PRIVADOS"
+            return "AUXILIAR_DOCUMENTOS_PRIVADOS" if has_aux else "DOCUMENTOS_PRIVADOS"
+        m_aux_num = re.match(r"^AUX(?:ILIAR|\.)?[\s_]+(?:NUMERO[\s_]+|NO\.?[\s_]+|NRO\.?[\s_]+)?(\d+)$", s)
+        if m_aux_num:
+            return f"AUXILIAR_{int(m_aux_num.group(1))}"
         s = re.sub(r"[^A-Z0-9]+", "_", s).strip("_")
         return s
 
     @classmethod
-    def extract_tomo_category(cls, text: str) -> Optional[str]:
+    def extract_tomo_category(cls, text: str, is_auxiliar: bool = False) -> Optional[str]:
         """
         Detecta determinísticamente si el texto afirmativo menciona alguna de las categorías
-        que van en la posición de Tomo (o en Fraccionamiento cuando Tomo es AUXILIAR):
-        - DOCUMENTOS_PRIVADOS ('DOCUMENTOS PRIVADOS', 'DOCUMENTO PRIVADO')
-        - CREDITO_AGRICOLA ('CREDITO AGRICOLA')
-        - ACTOS_Y_CONTRATOS ('ACTOS Y CONTRATOS')
+        que van en la posición de Tomo:
+        - ADQUISICIONES_DE_GOBIERNO
+        - DOCUMENTOS_PRIVADOS / AUXILIAR_DOCUMENTOS_PRIVADOS
+        - CREDITO_AGRICOLA / AUXILIAR_CREDITO_AGRICOLA
+        - ACTOS_Y_CONTRATOS / AUXILIAR_ACTOS_Y_CONTRATOS
+        - AUXILIAR_<NUMERO> (únicamente si dice explícitamente 'AUX. <N>' o 'AUXILIAR NUMERO <N>')
         """
         if not text:
             return None
         t = TextNormalizer.strip_accents(str(text).upper())
+        if re.search(r"\bADQUISICIONES?[\s_]+DE[\s_]+GOBIERNO\b", t):
+            return "ADQUISICIONES_DE_GOBIERNO"
         if re.search(r"\bDOCUMENTOS?[\s_]+PRIVADOS?\b", t):
-            return "DOCUMENTOS_PRIVADOS"
+            return "AUXILIAR_DOCUMENTOS_PRIVADOS" if is_auxiliar else "DOCUMENTOS_PRIVADOS"
         if re.search(r"\bCREDITO[\s_]+AGRICOLA\b", t):
-            return "CREDITO_AGRICOLA"
+            return "AUXILIAR_CREDITO_AGRICOLA" if is_auxiliar else "CREDITO_AGRICOLA"
         if re.search(r"\bACTOS[\s_]+Y[\s_]+CONTRATOS\b", t):
-            return "ACTOS_Y_CONTRATOS"
+            return "AUXILIAR_ACTOS_Y_CONTRATOS" if is_auxiliar else "ACTOS_Y_CONTRATOS"
+        m_aux_n = re.search(r"\b(?:AUX\.\s*(?:NUMERO\s+|NO\.?\s+)?(\d+)|AUXILIAR\s+(?:NUMERO|NO\.?|NRO\.?)\s*(\d+))\b", t)
+        if m_aux_n:
+            num_str = m_aux_n.group(1) or m_aux_n.group(2)
+            return f"AUXILIAR_{int(num_str)}"
         return None
+
+    @classmethod
+    def _has_fraccionamiento_or_colonia_in_document(cls, text: str) -> bool:
+        """
+        Verifica si el texto del documento menciona explícitamente Fraccionamiento(s),
+        Colonia(s), Predio(s) o CORETT. Si un documento NO menciona ninguno de estos
+        términos (ej. es un libro de Sociedades y Poderes, Actos y Contratos, Comercio, etc.),
+        la Posición 6 (Fraccionamiento) debe quedar en null ('00').
+        """
+        if not text:
+            return False
+        t = TextNormalizer.strip_accents(str(text).upper())
+        return bool(
+            re.search(
+                r"\b(?:FRACCIONAMIENTOS?|FRACCION|COLONIAS?|PREDIOS?|LOTIFICACION|CORETT)\b",
+                t
+            )
+        )
 
     @staticmethod
     def clean_fraccionamiento_name(raw: str) -> str:
@@ -619,6 +673,12 @@ class ClaudeVisionEngine:
         "NINGUN", "NINGUNO", "NINGUNA", "NINGUNOS", "NINGUNAS",
     }
 
+    NON_FRACCIONAMIENTO_MATTERS = {
+        "SOCIEDADES", "PODERES", "SOCIEDADES_Y_PODERES", "ESCRITURAS", "COMERCIO",
+        "MERCANTIL", "MERCANTILES", "HIPOTECAS", "HIPOTECA", "EMBARGOS", "EMBARGO",
+        "SENTENCIAS", "SENTENCIA", "ARRENDAMIENTOS", "TESTAMENTOS",
+    }
+
     @classmethod
     def extract_specific_fraccionamiento(cls, text: str) -> Optional[str]:
         if not text:
@@ -632,8 +692,12 @@ class ClaudeVisionEngine:
             flags=re.IGNORECASE
         )
         normalized = TextNormalizer.strip_accents(clean_text.upper())
+        if re.search(r"\bCORETT\b", normalized):
+            return "CORETT"
+
         pat = re.compile(
-            r'\b(?:DEL\s+|PARA\s+EL\s+|EN\s+EL\s+)?(?:FRACCIONAMIENTO|FRACCION\s+D[EC]|COLONIA|PREDIO\s+DENOMINADO|PREDIO)\s+'
+            r'\b(?:DEL\s+|PARA\s+EL\s+|PARA\s+LA\s+|EN\s+EL\s+|EN\s+LA\s+|LA\s+)?'
+            r'(FRACCIONAMIENTO|FRACCION\s+D[EC]|COLONIA|PREDIO\s+DENOMINADO|PREDIO)\s+'
             r'(?!Y\s+COLONIAS\b|O\s+COLONIAS\b|URBANOS?\b|RURALES?\b|DETECTAD[OA]S?\b|ENCONTRAD[OA]S?\b|MENCIONAD[OA]S?\b|'
             r'OBSERVAD[OA]S?\b|PROPUEST[OA]S?\b|SUGERID[OA]S?\b|IDENTIFICAD[OA]S?\b|GENERAL(?:ES)?\b|ESPECIFIC[OA]S?\b|'
             r'ESPECIFICAD[OA]S?\b|INDICAD[OA]S?\b|REGISTRAD[OA]S?\b|NO\s+|SIN\s+)'
@@ -645,14 +709,17 @@ class ClaudeVisionEngine:
             "OBSERVA", "COMENTARIO", "DESCRIPCION", "INDICA", "SENALA", "NINGUN", "NINGUNO",
             "EXISTE", "CONSTA", "FIGURA", "APARENTE", "PROBABLE", "DETECTADO", "ENCONTRADO",
             "ESPECIFICO", "GENERAL", "EXPLICACION"
-        }
+        } | cls.NON_FRACCIONAMIENTO_MATTERS
         for m in pat.finditer(normalized):
-            raw_match = m.group(1) or m.group(2) or ""
+            kind = (m.group(1) or "").strip().upper()
+            raw_match = m.group(2) or m.group(3) or ""
             candidate = cls.clean_fraccionamiento_name(raw_match)
             if not candidate or len(candidate) < 3:
                 continue
+            if candidate == "CORETT":
+                return "CORETT"
             cand_tokens = set(candidate.split("_"))
-            # Si el candidato completo es inválido o contiene palabras de razonamiento de la IA
+            # Si el candidato completo es inválido o contiene palabras de razonamiento de la IA / otras materias
             if candidate in cls.DISALLOWED_FRACCIONAMIENTO_NAMES or cand_tokens.intersection(disallowed_in_body):
                 continue
             if len(candidate.split("_")) > 5:
@@ -663,33 +730,57 @@ class ClaudeVisionEngine:
                 if len(sub_cand) < 3 or sub_cand in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
                     continue
                 candidate = sub_cand
+            # Regla solicitada: Si es una COLONIA, se pone SOLO el nombre de la colonia sin 'FRACCIONAMIENTO_' al inicio
+            if kind == "COLONIA":
+                return candidate
             return f"FRACCIONAMIENTO_{candidate}"
         return None
 
     @classmethod
-    def normalize_fraccionamiento_label(cls, val: str) -> str:
+    def normalize_fraccionamiento_label(cls, val: str) -> Optional[str]:
         if not val:
             return val
         s = TextNormalizer.strip_accents(str(val).strip().upper())
-        if s in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS", "FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "00", "0", "NULL", "NONE"]:
+        if s == "CORETT":
+            return "CORETT"
+        if s in ["COLONIAS", "FRACCIONAMIENTOS", "FRACCIONAMIENTOS_Y_COLONIAS"]:
+            return "FRACCIONAMIENTOS_Y_COLONIAS"
+        if s in [
+            "ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS", "ADQUISICIONES_DE_GOBIERNO",
+            "AUXILIAR_ACTOS_Y_CONTRATOS", "AUXILIAR_CREDITO_AGRICOLA", "AUXILIAR_DOCUMENTOS_PRIVADOS",
+            "00", "0", "NULL", "NONE"
+        ]:
             return s
+
+        is_colonia = False
         if s.startswith("FRACCIONAMIENTO_"):
             s_body = s[16:]
         elif s.startswith("FRACCION_"):
             s_body = s[9:]
+        elif s.startswith("COLONIA_"):
+            s_body = s[8:]
+            is_colonia = True
         else:
             s_body = s
+
         cleaned_body = cls.clean_fraccionamiento_name(s_body)
+        if cleaned_body == "CORETT":
+            return "CORETT"
+
+        body_tokens = set(cleaned_body.split("_")) if cleaned_body else set()
+        # Si contiene materias ajenas a fraccionamientos (ej. SOCIEDADES_Y_PODERES), devolver None ('00')
+        if cleaned_body in cls.NON_FRACCIONAMIENTO_MATTERS or body_tokens.intersection(cls.NON_FRACCIONAMIENTO_MATTERS):
+            return None
+
         if not cleaned_body or cleaned_body in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
             return "FRACCIONAMIENTOS_Y_COLONIAS"
 
         # Validar que ningún token dentro del cuerpo pertenezca a frases de razonamiento de la IA
-        body_tokens = set(cleaned_body.split("_"))
         disallowed_in_body = {
             "CONCRETO", "TEXTO", "VISIBLE", "PARECE", "REFERIRSE", "ESPECIFICA", "MENCIONA",
             "OBSERVA", "COMENTARIO", "DESCRIPCION", "INDICA", "SENALA", "NINGUN", "NINGUNO",
             "EXISTE", "CONSTA", "FIGURA", "APARENTE", "PROBABLE", "DETECTADO", "ENCONTRADO",
-            "ESPECIFICO", "GENERAL"
+            "ESPECIFICO", "GENERAL", "EXPLICACION"
         }
         if body_tokens.intersection(disallowed_in_body) or len(cleaned_body.split("_")) > 5:
             return "FRACCIONAMIENTOS_Y_COLONIAS"
@@ -700,6 +791,9 @@ class ClaudeVisionEngine:
             if not sub_body or sub_body in cls.DISALLOWED_FRACCIONAMIENTO_NAMES:
                 return "FRACCIONAMIENTOS_Y_COLONIAS"
             cleaned_body = sub_body
+
+        if is_colonia:
+            return cleaned_body
         return f"FRACCIONAMIENTO_{cleaned_body}"
 
     @staticmethod
@@ -796,12 +890,13 @@ class ClaudeVisionEngine:
         1A. Si NO aparece explícitamente la palabra 'AUXILIAR' en el texto literal del documento,
             el documento NO es auxiliar (restaura el Tomo numérico original y limpia Volumen).
         1B. Si SÍ aparece explícitamente la palabra 'AUXILIAR' en el texto literal del documento,
-            garantiza es_auxiliar=True y que 'AUXILIAR' ocupe la posición de Tomo (cuando hay número de libro).
-        1C. Si el documento menciona 'DOCUMENTOS PRIVADOS', 'CREDITO AGRICOLA' o 'ACTOS Y CONTRATOS',
-            asegura que se coloque en 'tomo' (o en 'fraccionamiento' si 'tomo' es 'AUXILIAR').
-        2.  Si el fraccionamiento es genérico ('FRACCIONAMIENTOS_Y_COLONIAS' o 'COLONIAS'),
-            pero en el texto se nombra un fraccionamiento específico, PREVALECE el específico
-            con formato 'FRACCIONAMIENTO_<NOMBRE>'.
+            garantiza es_auxiliar=True y que 'AUXILIAR' (o 'AUXILIAR_<CATEGORIA>' / 'AUXILIAR_<NUMERO>')
+            ocupe la posición de Tomo (cuando hay número de libro).
+        1C. Las categorías 'ADQUISICIONES_DE_GOBIERNO', 'DOCUMENTOS_PRIVADOS', 'CREDITO_AGRICOLA',
+            'ACTOS_Y_CONTRATOS' (y sus variantes 'AUXILIAR_...') van SIEMPRE en 'tomo', NUNCA en 'fraccionamiento'.
+        2.  En 'fraccionamiento' SOLO van fraccionamientos ('FRACCIONAMIENTO_<NOMBRE>'), colonias ('<NOMBRE>'),
+            'CORETT', o 'FRACCIONAMIENTOS_Y_COLONIAS'. Si el documento NO menciona fraccionamientos/colonias/CORETT
+            (ej. dice 'SOCIEDADES Y PODERES'), 'fraccionamiento' se limpia a None ('00').
         """
         if not isinstance(doc, dict):
             return doc, False
@@ -825,14 +920,16 @@ class ClaudeVisionEngine:
             and not cls._is_negative_or_absence_line(str(e))
         )
 
+        has_positive_aux = False
         # --- REGLA 1: Sanitización y recuperación determinística de AUXILIAR ---
         if has_any_text_evidence:
             has_positive_aux = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
-            if (doc.get("tomo") == "AUXILIAR" or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
+            curr_tom_up = str(doc.get("tomo") or "").strip().upper()
+            if (curr_tom_up.startswith("AUXILIAR") or doc.get("es_auxiliar") or doc.get("libro") == "AUXILIAR") and not has_positive_aux:
                 repaired["es_auxiliar"] = False
 
                 # Recuperar el tomo real desde las evidencias afirmativas o desde el volumen desplazado
-                restored_tomo: Optional[int] = None
+                restored_tomo: Optional[Any] = None
                 for ev in evidencias:
                     s_ev = str(ev).strip()
                     if cls._is_negative_or_absence_line(s_ev):
@@ -879,8 +976,13 @@ class ClaudeVisionEngine:
                 elif isinstance(repaired.get("volumen"), int) and not has_positive_vol:
                     repaired["tomo"] = repaired["volumen"]
                     repaired["volumen"] = None
-                elif repaired.get("tomo") == "AUXILIAR":
-                    repaired["tomo"] = None
+                elif curr_tom_up.startswith("AUXILIAR"):
+                    # Si era AUXILIAR_ACTOS_Y_CONTRATOS pero no tiene auxiliar en texto, dejar ACTOS_Y_CONTRATOS
+                    stripped_cat = curr_tom_up.replace("AUXILIAR_", "").strip("_")
+                    if stripped_cat in cls.VALID_TOMO_CATEGORIES and stripped_cat != "AUXILIAR":
+                        repaired["tomo"] = stripped_cat
+                    else:
+                        repaired["tomo"] = None
 
                 if repaired.get("libro") == "AUXILIAR":
                     repaired["libro"] = None
@@ -900,7 +1002,6 @@ class ClaudeVisionEngine:
 
             elif has_positive_aux:
                 # REGLA 1B: El documento SÍ dice explícitamente AUXILIAR en su texto literal.
-                # Asegurar que es_auxiliar=True y que AUXILIAR ocupe la posición de Tomo (si hay número de libro).
                 if not repaired.get("es_auxiliar"):
                     repaired["es_auxiliar"] = True
                     changed = True
@@ -916,12 +1017,14 @@ class ClaudeVisionEngine:
                             repaired["volumen"] = int(str(curr_tom).strip())
                         repaired["tomo"] = "AUXILIAR"
                         changed = True
-                    elif isinstance(curr_tom, str) and str(curr_tom).strip().upper() != "AUXILIAR":
-                        cat_in_tom = cls._clean_alnum_label(str(curr_tom))
-                        if repaired.get("fraccionamiento") in (None, "0", "00", 0, "", "NULL", "NONE"):
-                            repaired["fraccionamiento"] = cat_in_tom
-                        repaired["tomo"] = "AUXILIAR"
-                        changed = True
+                    elif isinstance(curr_tom, str):
+                        up_ct = cls._clean_alnum_label(str(curr_tom))
+                        if up_ct in ("ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS"):
+                            repaired["tomo"] = f"AUXILIAR_{up_ct}"
+                            changed = True
+                        elif not cls.is_valid_tomo_category(up_ct):
+                            repaired["tomo"] = "AUXILIAR"
+                            changed = True
 
                 # Si volumen está vacío pero en las citas literales se menciona explícitamente VOLUMEN <N> (ej. VOLUMEN "I")
                 if repaired.get("volumen") in (None, "0", "00", 0, "", "NULL", "NONE"):
@@ -936,67 +1039,105 @@ class ClaudeVisionEngine:
                             repaired["volumen"] = parsed_v
                             changed = True
 
-        # --- REGLA 1C: Categorías de Tomo (DOCUMENTOS_PRIVADOS, CREDITO_AGRICOLA, ACTOS_Y_CONTRATOS) ---
-        curr_tom_check = repaired.get("tomo")
+        # --- REGLA 1C: Categorías de Tomo (ADQUISICIONES_DE_GOBIERNO, DOCUMENTOS_PRIVADOS, CREDITO_AGRICOLA, ACTOS_Y_CONTRATOS) ---
+        is_aux_now = bool(repaired.get("es_auxiliar") or str(repaired.get("tomo") or "").upper().startswith("AUXILIAR"))
         curr_fracc_check = str(repaired.get("fraccionamiento") or "").strip().upper()
-        if curr_fracc_check in ("DOCUMENTOS_PRIVADOS", "CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS"):
-            if curr_tom_check in (None, "0", "00", 0, "", "NULL", "NONE"):
-                repaired["tomo"] = curr_fracc_check
-                repaired["fraccionamiento"] = None
-                curr_tom_check = curr_fracc_check
-                changed = True
-
-        if has_any_text_evidence:
-            detected_tomo_cat = cls.extract_tomo_category(all_text)
-            if detected_tomo_cat:
-                if repaired.get("tomo") in (None, "0", "00", 0, "", "NULL", "NONE"):
-                    repaired["tomo"] = detected_tomo_cat
-                    changed = True
-                elif repaired.get("tomo") == "AUXILIAR" and repaired.get("fraccionamiento") in (None, "0", "00", 0, "", "NULL", "NONE"):
-                    repaired["fraccionamiento"] = detected_tomo_cat
-                    changed = True
-
-        # --- REGLA 2: Prioridad de Fraccionamientos Específicos sobre genéricos ---
-        curr_fracc = repaired.get("fraccionamiento")
-        curr_fracc_str = str(curr_fracc or "").upper()
-        # Reparar valores espurios cacheados como FRACCIONAMIENTO_DETECTADO o frases explicativas de la IA
-        if curr_fracc in [
-            "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_MENCIONADO",
-            "FRACCIONAMIENTO_PROPUESTO", "FRACCIONAMIENTO_SUGERIDO", "FRACCIONAMIENTO_ESPECIFICO",
-            "FRACCIONAMIENTO_GENERAL"
-        ] or any(bad in curr_fracc_str for bad in [
-            "CONCRETO", "TEXTO", "VISIBLE", "PARECE", "REFERIRSE", "ESPECIFICA",
-            "MENCIONA", "OBSERVA", "COMENTARIO", "EXPLICACION", "DESCRIPCION"
-        ]) or len(curr_fracc_str.split("_")) > 6:
-            curr_fracc = "FRACCIONAMIENTOS_Y_COLONIAS"
-            repaired["fraccionamiento"] = "FRACCIONAMIENTOS_Y_COLONIAS"
+        if curr_fracc_check in (
+            "DOCUMENTOS_PRIVADOS", "CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "ADQUISICIONES_DE_GOBIERNO",
+            "AUXILIAR_DOCUMENTOS_PRIVADOS", "AUXILIAR_CREDITO_AGRICOLA", "AUXILIAR_ACTOS_Y_CONTRATOS"
+        ):
+            # Esas categorías van en Tomo, nunca en Fraccionamiento
+            base_cat = curr_fracc_check.replace("AUXILIAR_", "")
+            if is_aux_now and base_cat in ("DOCUMENTOS_PRIVADOS", "CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS"):
+                new_tom = f"AUXILIAR_{base_cat}"
+            else:
+                new_tom = base_cat
+            if repaired.get("tomo") in (None, "0", "00", 0, "", "NULL", "NONE", "AUXILIAR"):
+                repaired["tomo"] = new_tom
+            repaired["fraccionamiento"] = None
             changed = True
 
-        if curr_fracc in ["FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "FRACCIONAMIENTOS", None, "00", "0"]:
-            specific_f = cls.extract_specific_fraccionamiento(all_text)
-            if specific_f and specific_f != curr_fracc:
-                repaired["fraccionamiento"] = specific_f
+        if has_any_text_evidence:
+            detected_tomo_cat = cls.extract_tomo_category(all_text, is_auxiliar=is_aux_now)
+            if detected_tomo_cat:
+                if repaired.get("tomo") in (None, "0", "00", 0, "", "NULL", "NONE", "AUXILIAR"):
+                    if repaired.get("tomo") != detected_tomo_cat:
+                        repaired["tomo"] = detected_tomo_cat
+                        changed = True
+
+            # Si en tomo quedó un texto que no es numérico ni una categoría válida de Tomo, limpiarlo
+            curr_t_val = repaired.get("tomo")
+            if isinstance(curr_t_val, str) and not curr_t_val.strip().isdigit() and curr_t_val.strip().upper() not in ("0", "00", "NULL", "NONE", ""):
+                cleaned_t = cls._clean_alnum_label(curr_t_val)
+                if cls.is_valid_tomo_category(cleaned_t):
+                    if cleaned_t != curr_t_val:
+                        repaired["tomo"] = cleaned_t
+                        changed = True
+                else:
+                    repaired["tomo"] = "AUXILIAR" if is_aux_now else None
+                    changed = True
+
+        # --- REGLA 2: Exclusividad y Prioridad de Fraccionamientos / Colonias / CORETT en Posición 6 ---
+        curr_fracc = repaired.get("fraccionamiento")
+        curr_fracc_str = str(curr_fracc or "").strip().upper()
+
+        # Si hay evidencia textual del documento y el documento NO habla en absoluto de Fraccionamientos, Colonias, Predios ni CORETT
+        # (por ejemplo, el libro es de 'SOCIEDADES Y PODERES'), Posición 6 DEBE ser None ('00').
+        if has_any_text_evidence and not cls._has_fraccionamiento_or_colonia_in_document(all_text):
+            if curr_fracc not in (None, "00", "0", ""):
+                repaired["fraccionamiento"] = None
                 ev_list = [
                     e for e in repaired.get("evidencias", [])
                     if not str(e).strip().startswith("ℹ Fraccionamiento específico detectado:")
                 ]
-                ev_list.append(f"ℹ Fraccionamiento específico detectado: '{specific_f}' (reemplaza genérico '{curr_fracc}')")
                 repaired["evidencias"] = ev_list
+                curr_fracc = None
+                curr_fracc_str = ""
                 changed = True
-        elif curr_fracc and str(curr_fracc).strip().upper() not in ["ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS", "NULL", "NONE"]:
-            norm_f = cls.normalize_fraccionamiento_label(str(curr_fracc))
-            if norm_f != curr_fracc:
-                repaired["fraccionamiento"] = norm_f
-                ev_list = [
-                    (
-                        f"ℹ Fraccionamiento específico detectado: '{norm_f}' (normalizado)"
-                        if str(e).strip().startswith("ℹ Fraccionamiento específico detectado:")
-                        else e
-                    )
-                    for e in repaired.get("evidencias", [])
-                ]
-                repaired["evidencias"] = ev_list
+        else:
+            # El documento SÍ trata de Fraccionamientos / Colonias / CORETT (o no tiene texto)
+            # 1. Si era 'COLONIAS' o un valor espurio de razonamiento de IA, normalizar a 'FRACCIONAMIENTOS_Y_COLONIAS'
+            if curr_fracc_str in [
+                "COLONIAS", "FRACCIONAMIENTOS",
+                "FRACCIONAMIENTO_DETECTADO", "FRACCIONAMIENTO_ENCONTRADO", "FRACCIONAMIENTO_MENCIONADO",
+                "FRACCIONAMIENTO_PROPUESTO", "FRACCIONAMIENTO_SUGERIDO", "FRACCIONAMIENTO_ESPECIFICO",
+                "FRACCIONAMIENTO_GENERAL"
+            ] or any(bad in curr_fracc_str for bad in [
+                "CONCRETO", "TEXTO", "VISIBLE", "PARECE", "REFERIRSE", "ESPECIFICA",
+                "MENCIONA", "OBSERVA", "COMENTARIO", "EXPLICACION", "DESCRIPCION"
+            ]) or len(curr_fracc_str.split("_")) > 6:
+                curr_fracc = "FRACCIONAMIENTOS_Y_COLONIAS"
+                repaired["fraccionamiento"] = "FRACCIONAMIENTOS_Y_COLONIAS"
                 changed = True
+
+            # 2. Siempre verificar si en el texto se nombra un Fraccionamiento específico, una Colonia específica o CORETT
+            specific_f = cls.extract_specific_fraccionamiento(all_text) if has_any_text_evidence else None
+            if specific_f:
+                if specific_f != repaired.get("fraccionamiento"):
+                    old_f = repaired.get("fraccionamiento")
+                    repaired["fraccionamiento"] = specific_f
+                    ev_list = [
+                        e for e in repaired.get("evidencias", [])
+                        if not str(e).strip().startswith("ℹ Fraccionamiento específico detectado:")
+                    ]
+                    ev_list.append(f"ℹ Fraccionamiento/Colonia detectado: '{specific_f}' (anterior: '{old_f}')")
+                    repaired["evidencias"] = ev_list
+                    changed = True
+            elif curr_fracc and str(curr_fracc).strip().upper() not in ["FRACCIONAMIENTOS_Y_COLONIAS", "CORETT", "NULL", "NONE", "00", "0"]:
+                norm_f = cls.normalize_fraccionamiento_label(str(curr_fracc))
+                if norm_f != curr_fracc:
+                    repaired["fraccionamiento"] = norm_f
+                    ev_list = [
+                        (
+                            f"ℹ Fraccionamiento/Colonia detectado: '{norm_f}' (normalizado)"
+                            if str(e).strip().startswith("ℹ Fraccionamiento")
+                            else e
+                        )
+                        for e in repaired.get("evidencias", [])
+                        if not (norm_f is None and str(e).strip().startswith("ℹ Fraccionamiento"))
+                    ]
+                    repaired["evidencias"] = ev_list
+                    changed = True
 
         # --- REGLA 3: Recuperación determinística de Sección Numerada si está en null o ceros ---
         curr_sec = repaired.get("seccion")
@@ -1054,7 +1195,7 @@ class ClaudeVisionEngine:
         evidencias_joined = cls._extract_positive_evidencias_text(evidencias)
         all_text_context = f"{transcripcion_literal}\n{evidencias_joined}\n{texto_descriptivo}"
 
-        # 1. Sección: SOLO puede ser numérica (1..5) o None. Si viene texto alfanumérico, va a Tomo.
+        # 1. Sección: SOLO puede ser numérica (1..5) o None. Si viene texto alfanumérico, se evalúa para Tomo.
         raw_sec = fields_src.get("seccion")
         alnum_from_sec: Optional[str] = None
         if isinstance(raw_sec, int):
@@ -1066,7 +1207,7 @@ class ClaudeVisionEngine:
             else:
                 sec_val = None
                 cleaned_s = cls._clean_alnum_label(raw_sec)
-                if cleaned_s and cleaned_s not in ["NULL", "NONE", "0", "00"]:
+                if cleaned_s and cleaned_s not in ["NULL", "NONE", "0", "00"] and cls.is_valid_tomo_category(cleaned_s):
                     alnum_from_sec = cleaned_s
         else:
             sec_val = None
@@ -1074,7 +1215,6 @@ class ClaudeVisionEngine:
         # REGLA DETERMINÍSTICA: Si la sección no vino definida numéricamente (null o 0),
         # pero el documento menciona explícitamente una sección numerada (ej. 'SECCIÓN PRIMERA',
         # '(SECCIÓN PRIMERA)', etc.), recuperarla determinísticamente del texto.
-        # NUNCA se anula la sección numerada porque el libro sea AUXILIAR.
         if sec_val is None:
             detected_sec = cls.extract_numbered_section(all_text_context)
             if detected_sec is not None:
@@ -1092,7 +1232,6 @@ class ClaudeVisionEngine:
             up_lib = raw_lib.strip().upper()
             if "AUXILIAR" in up_lib:
                 lib_had_auxiliar = True
-                # Verificar si además de AUXILIAR venía un número en raw_lib (ej. "2 AUXILIAR")
                 num_in_lib = TextNormalizer.parse_number_or_word(re.sub(r"AUXILIAR", "", up_lib).strip())
                 if num_in_lib is not None:
                     lib_val = num_in_lib
@@ -1102,7 +1241,6 @@ class ClaudeVisionEngine:
                 parsed_l = TextNormalizer.parse_number_or_word(up_lib)
                 lib_val = parsed_l if parsed_l is not None else up_lib
 
-        # Si Claude puso libro="AUXILIAR", verificar en las evidencias si había un "LIBRO NUMERO X" o "LIBRO SEGUNDO"
         if lib_val == "AUXILIAR" and all_text_context:
             m_lib = re.search(
                 r"LIBRO\s+(?:NUMERO\s+)?(\d+|PRIMERO|SEGUNDO|TERCERO|CUARTO|QUINTO|UNO|DOS|TRES|CUATRO|CINCO)\b",
@@ -1114,10 +1252,9 @@ class ClaudeVisionEngine:
                     lib_val = num_ev
                     lib_had_auxiliar = True
 
-        # 3. Tomo (numérico o categoría alfanumérica como CREDITO_AGRICOLA, ACTOS_Y_CONTRATOS, DOCUMENTOS_PRIVADOS, AUXILIAR)
+        # 3. Tomo (numérico o categoría alfanumérica permitida en Tomo)
         raw_tom = fields_src.get("tomo")
         tom_val: Optional[Any] = None
-        displaced_alnum_from_tomo: Optional[str] = None
         if isinstance(raw_tom, int):
             tom_val = raw_tom
         elif isinstance(raw_tom, str) and raw_tom.strip():
@@ -1126,25 +1263,27 @@ class ClaudeVisionEngine:
                 parsed_t = TextNormalizer.parse_number_or_word(up_tom)
                 if parsed_t is not None and up_tom.isdigit():
                     tom_val = parsed_t
-                elif parsed_t is not None and not any(w in up_tom for w in ["CREDITO", "ACTOS", "AUXILIAR", "CONTRATOS", "AGRICOLA", "DOCUMENTO", "PRIVADO"]):
+                elif parsed_t is not None and not any(
+                    w in up_tom for w in ["CREDITO", "ACTOS", "AUXILIAR", "AUX", "CONTRATOS", "AGRICOLA", "DOCUMENTO", "PRIVADO", "ADQUISICION", "GOBIERNO"]
+                ):
                     tom_val = parsed_t
                 else:
-                    tom_val = cls._clean_alnum_label(up_tom)
+                    cleaned_tom = cls._clean_alnum_label(up_tom)
+                    if cls.is_valid_tomo_category(cleaned_tom):
+                        tom_val = cleaned_tom
 
         # REGLA FUNDAMENTAL DE AUXILIAR:
-        # El documento es AUXILIAR si y solo si la palabra 'AUXILIAR' aparece explícitamente escrita
-        # de forma afirmativa en el texto literal del sello o acta de apertura.
         has_real_auxiliar = cls._has_explicit_auxiliar_in_document(evidencias, transcripcion_literal)
 
         if not has_real_auxiliar:
             es_aux = False
             lib_had_auxiliar = False
-            if tom_val == "AUXILIAR":
-                tom_val = None
+            if isinstance(tom_val, str) and tom_val.startswith("AUXILIAR"):
+                stripped_t = tom_val.replace("AUXILIAR_", "").strip("_")
+                tom_val = stripped_t if (stripped_t in cls.VALID_TOMO_CATEGORIES and stripped_t != "AUXILIAR") else None
             if lib_val == "AUXILIAR":
                 lib_val = None
 
-            # Si Claude había desplazado el Tomo a Volumen por alucinación de Auxiliar, restaurarlo
             has_positive_vol = any(
                 "VOLUMEN" in TextNormalizer.strip_accents(str(ev).upper())
                 and not cls._is_negative_or_absence_line(str(ev))
@@ -1155,7 +1294,6 @@ class ClaudeVisionEngine:
                 tom_val = raw_vol_val
                 fields_src["volumen"] = None
 
-            # Si aún no se tiene tomo, buscar si venía en las evidencias afirmativas
             if tom_val is None:
                 for ev in evidencias:
                     s_ev = str(ev).strip()
@@ -1178,32 +1316,32 @@ class ClaudeVisionEngine:
 
         is_auxiliar_doc = bool(has_real_auxiliar)
 
-        # Si el documento es AUXILIAR y tiene libro numérico, AUXILIAR ocupa obligatoriamente la posición de Tomo
         if is_auxiliar_doc:
             es_aux = True
             if lib_val is not None and lib_val != "AUXILIAR":
                 if tom_val is None:
                     tom_val = "AUXILIAR"
                 elif isinstance(tom_val, int) and fields_src.get("volumen") is None:
-                    # El número se desplaza a volumen y AUXILIAR ocupa Tomo
                     fields_src["volumen"] = tom_val
                     tom_val = "AUXILIAR"
-                elif isinstance(tom_val, str) and tom_val != "AUXILIAR":
-                    # Si en tomo estaba ACTOS_Y_CONTRATOS, CREDITO_AGRICOLA o DOCUMENTOS_PRIVADOS pero el libro también es AUXILIAR,
-                    # AUXILIAR va en tomo y la categoría pasa a fraccionamiento
-                    displaced_alnum_from_tomo = tom_val
-                    tom_val = "AUXILIAR"
+                elif isinstance(tom_val, str) and not tom_val.startswith("AUXILIAR"):
+                    if tom_val in ("ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS"):
+                        tom_val = f"AUXILIAR_{tom_val}"
+                    else:
+                        tom_val = "AUXILIAR"
             elif lib_val is None:
                 lib_val = "AUXILIAR"
 
-        # Si NO es auxiliar y la sección traía nombre alfanumérico o el texto menciona DOCUMENTOS PRIVADOS / CREDITO AGRICOLA / ACTOS Y CONTRATOS
-        if tom_val is None:
-            if alnum_from_sec:
-                tom_val = alnum_from_sec
+        # Detectar categoría de Tomo desde el texto (ADQUISICIONES_DE_GOBIERNO, DOCUMENTOS_PRIVADOS, CREDITO_AGRICOLA, ACTOS_Y_CONTRATOS, AUXILIAR_<N>)
+        detected_cat = cls.extract_tomo_category(all_text_context, is_auxiliar=is_auxiliar_doc)
+        if detected_cat:
+            if tom_val in (None, "AUXILIAR"):
+                tom_val = detected_cat
+        elif tom_val is None and alnum_from_sec:
+            if is_auxiliar_doc and alnum_from_sec in ("ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS"):
+                tom_val = f"AUXILIAR_{alnum_from_sec}"
             else:
-                detected_cat = cls.extract_tomo_category(all_text_context)
-                if detected_cat:
-                    tom_val = detected_cat
+                tom_val = alnum_from_sec
 
         # 4. Volumen
         raw_vol = fields_src.get("volumen")
@@ -1215,41 +1353,42 @@ class ClaudeVisionEngine:
         else:
             vol_val = None
 
-        # 5. Fraccionamiento (o categoría secundaria cuando Tomo ya está ocupado por AUXILIAR)
+        if vol_val is None and all_text_context:
+            all_up_vol = TextNormalizer.strip_accents(all_text_context.upper())
+            m_vol = re.search(
+                r'\bVOLUMEN\s+(?:(?:NUMERO|NRO\.?|NUM\.?|NO\.?)\s+)?["\']?([A-Z0-9]+(?:\s*\([A-Z0-9]+\))?)["\']?',
+                all_up_vol
+            )
+            if m_vol:
+                vol_val = TextNormalizer.parse_number_or_word(m_vol.group(1))
+
+        # 5. Fraccionamiento (EXCLUSIVAMENTE para Fraccionamientos, Colonias o CORETT)
         raw_fracc = fields_src.get("fraccionamiento")
         fracc_val: Optional[str] = None
         if raw_fracc and str(raw_fracc).strip().upper() not in ["NULL", "NONE", "00", "0"]:
             cleaned_f = cls._clean_alnum_label(str(raw_fracc))
-            if cleaned_f in ["CREDITO_AGRICOLA", "ACTOS_Y_CONTRATOS", "DOCUMENTOS_PRIVADOS"]:
-                if tom_val == "AUXILIAR":
-                    fracc_val = cleaned_f
-                elif tom_val is None:
+            if cls.is_valid_tomo_category(cleaned_f) and cleaned_f != "AUXILIAR":
+                # Si Claude puso una categoría de Tomo en fraccionamiento, moverla a Tomo
+                base_c = cleaned_f.replace("AUXILIAR_", "")
+                if is_auxiliar_doc and base_c in ("ACTOS_Y_CONTRATOS", "CREDITO_AGRICOLA", "DOCUMENTOS_PRIVADOS"):
+                    tom_val = f"AUXILIAR_{base_c}"
+                elif tom_val in (None, "AUXILIAR"):
                     tom_val = cleaned_f
-                    fracc_val = None
-                else:
-                    fracc_val = cleaned_f
+                fracc_val = None
             else:
-                fracc_val = cls.normalize_fraccionamiento_label(cleaned_f)
+                fracc_val = cls.normalize_fraccionamiento_label(str(raw_fracc))
 
-        # REGLA DE PRIORIDAD: Si fraccionamiento es genérico ('FRACCIONAMIENTOS_Y_COLONIAS', 'COLONIAS') o None,
-        # pero el texto del documento especifica el nombre concreto de un fraccionamiento/predio/colonia,
-        # PREVALECE el nombre específico con formato 'FRACCIONAMIENTO_<NOMBRE>'.
-        if fracc_val is None or fracc_val in ["FRACCIONAMIENTOS_Y_COLONIAS", "COLONIAS", "FRACCIONAMIENTOS"]:
+        # Si hay texto en el documento y NO menciona en absoluto Fraccionamientos, Colonias, Predios ni CORETT,
+        # la Posición 6 (fraccionamiento) DEBE ser None ('00').
+        has_any_doc_text = bool(all_text_context.strip())
+        if has_any_doc_text and not cls._has_fraccionamiento_or_colonia_in_document(all_text_context):
+            fracc_val = None
+        else:
             specific_fracc = cls.extract_specific_fraccionamiento(all_text_context)
             if specific_fracc:
                 fracc_val = specific_fracc
-
-        # Si Tomo es AUXILIAR y el documento además pertenece a ACTOS_Y_CONTRATOS, CREDITO_AGRICOLA o DOCUMENTOS_PRIVADOS,
-        # colocar esa categoría en la posición de Fraccionamiento
-        if tom_val == "AUXILIAR" and fracc_val is None:
-            if displaced_alnum_from_tomo:
-                fracc_val = displaced_alnum_from_tomo
-            elif alnum_from_sec:
-                fracc_val = alnum_from_sec
-            else:
-                detected_cat = cls.extract_tomo_category(all_text_context)
-                if detected_cat:
-                    fracc_val = detected_cat
+            elif fracc_val in (None, "COLONIAS", "FRACCIONAMIENTOS") and cls._has_fraccionamiento_or_colonia_in_document(all_text_context):
+                fracc_val = "FRACCIONAMIENTOS_Y_COLONIAS"
 
         # 6. Año
         raw_anio = fields_src.get("anio")
@@ -1267,7 +1406,7 @@ class ClaudeVisionEngine:
             "volumen": vol_val,
             "fraccionamiento": fracc_val,
             "anio": anio_val,
-            "es_auxiliar": es_aux or (tom_val == "AUXILIAR") or (lib_val == "AUXILIAR"),
+            "es_auxiliar": es_aux or str(tom_val or "").startswith("AUXILIAR") or (lib_val == "AUXILIAR"),
             "transcripcion_literal": transcripcion_literal,
             "texto_descriptivo": texto_descriptivo,
             "evidencias": evidencias

@@ -63,11 +63,15 @@ class FolderParser:
                     fraccionamiento_raw = mid[-1]
                 else:
                     # Caso 2: Buscar el token numérico de Volumen entre mid[1] y mid[-2]
+                    # Si el Tomo es AUXILIAR_<NUMERO> (ej. AUXILIAR_25_00_FRACCIONAMIENTO_X), el volumen es mid[2]
                     vol_idx = None
-                    for k in range(1, len(mid) - 1):
-                        if mid[k].isdigit():
-                            vol_idx = k
-                            break
+                    if mid[0].upper() == "AUXILIAR" and len(mid) >= 4 and mid[1].isdigit() and mid[2].isdigit():
+                        vol_idx = 2
+                    else:
+                        for k in range(1, len(mid) - 1):
+                            if mid[k].isdigit():
+                                vol_idx = k
+                                break
                     if vol_idx is not None:
                         tomo_raw = "_".join(mid[:vol_idx])
                         volumen_raw = mid[vol_idx]
