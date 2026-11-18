@@ -1354,9 +1354,9 @@ class FolderOCRService:
 
         if hasattr(self, "cache") and self.cache:
             try:
-                if str(folder_path) != str(new_folder_path):
+                if str(folder_path) != str(new_folder_p):
                     self.cache.invalidate_folder_diagnosis(Path(folder_path))
-                self.cache.save_folder_diagnosis(new_folder_path, diag_result)
+                self.cache.save_folder_diagnosis(new_folder_p, diag_result)
             except Exception:
                 pass
 
@@ -2569,6 +2569,344 @@ class FolderOCRService:
             "rollback_errors": rb_errors,
             "mysql_reset": {"ok": mysql_ok, "msg": mysql_msg},
             "cache_cleared": cache_cleared,
+        }
+
+    def exportar_trazabilidad_correctos_xlsx(
+        self,
+        output_path: str,
+        live_items: Optional[List[Dict[str, Any]]] = None,
+        max_rows_per_pdf_sheet: int = 900_000,
+    ) -> Dict[str, Any]:
+        """
+        Genera un reporte limpio en Excel (.xlsx) en modo streaming (~0 MB RAM)
+        conteniendo ÚNICAMENTE las carpetas y PDFs que están como CORRECTOS
+        (validados / concluidos sin discrepancias pendientes y fuera de APARTADOS),
+        con solo 3 columnas:
+        - Hoja 1 ('Carpetas_Correctas'): Nombre_Original | Nombre_Actual | Ruta_Actual
+        - Hoja 2+ ('PDFs_Correctos_1', 'PDFs_Correctos_2', ...): Nombre_Original | Nombre_Actual | Ruta_Actual
+          (paginando automáticamente cada `max_rows_per_pdf_sheet` filas para nunca saturar el límite de Excel).
+        """
+        from src.core.xlsx_streamer import StreamingXlsxWriter
+
+        # 1. Construir mapa de estados conocidos por ruta y por nombre desde Sesión en Vivo y Caché de Carpetas
+        diag_by_path: Dict[str, Dict[str, Any]] = {}
+        diag_by_name: Dict[str, Dict[str, Any]] = {}
+
+        if hasattr(self, "cache") and self.cache:
+            try:
+                cached_folders = self.cache.get_all_folder_diagnoses()
+                for p_str, entry in cached_folders.items():
+                    diag = entry.get("diagnosis") if isinstance(entry, dict) else None
+                    if isinstance(diag, dict):
+                        norm_p = os.path.normcase(str(Path(p_str)))
+                        diag_by_path[norm_p] = diag
+                        fn = diag.get("folder_data", {}).get("folder_name") or Path(p_str).name
+                        if fn:
+                            diag_by_name[fn.upper()] = diag
+                        init_fn = diag.get("initial_folder_name")
+                        if init_fn:
+                            diag_by_name[str(init_fn).upper()] = diag
+            except Exception as cache_err:
+                logger.debug(f"No se pudo leer caché de carpetas para reporte de correctos: {cache_err}")
+
+        if live_items:
+            for item in live_items:
+                if not isinstance(item, dict):
+                    continue
+                fp = item.get("folder_path", "")
+                if fp:
+                    diag_by_path[os.path.normcase(str(Path(fp)))] = item
+                fn = item.get("folder_data", {}).get("folder_name") or (Path(fp).name if fp else "")
+                if fn:
+                    diag_by_name[fn.upper()] = item
+                init_fn = item.get("initial_folder_name")
+                if init_fn:
+                    diag_by_name[str(init_fn).upper()] = item
+
+        def _is_apartados_path_or_action(ruta_str: str, tipo_acc: str = "") -> bool:
+            t_up = str(tipo_acc or "").upper()
+            if "APARTADO" in t_up or "DRY_RUN" in t_up:
+                return True
+            if not ruta_str:
+                return False
+            parts_up = [p.upper() for p in Path(ruta_str).parts]
+            return any("APARTADO" in p for p in parts_up)
+
+        def _is_valid_structure_name(folder_name: str) -> bool:
+            parsed = FolderParser.parse(folder_name)
+            if not parsed or not parsed.get("delegacion"):
+                return False
+            if parsed.get("libro_val") in (0, "0", "00", None):
+                return False
+            if parsed.get("anio_val") in (0, "0", "0000", None):
+                return False
+            return True
+
+        def _is_diag_correct(diag: Optional[Dict[str, Any]], curr_name: str, orig_name: str, tipo_acc: str = "") -> bool:
+            if not diag:
+                return True
+            v_glob = str(diag.get("veredicto_global") or "").upper()
+            if "APARTAD" in v_glob or "ERROR" in v_glob or "SIN_ARCHIVO_CARATULA" in v_glob or "SIN_DATOS" in v_glob:
+                return False
+            if diag.get("moved_destination_type") == "APARTADOS":
+                return False
+            if diag.get("needs_apartar"):
+                return False
+            # Si ya fue movida a correctos/validados o coincide total, es correcta
+            if v_glob in ("COINCIDE_TOTAL", "MOVIDO_A_CORRECTOS") or "CORRECTO" in str(tipo_acc).upper() or "VALIDADO" in str(tipo_acc).upper():
+                return True
+            # Si tenía discrepancia y aún necesita renombre o reemplazo de página no aplicado, no está concluida como correcta
+            if diag.get("has_discrepancy") or diag.get("needs_rename") or diag.get("needs_page_replacement"):
+                sugg = diag.get("codigo_base_sugerido") or ""
+                clean_curr = FileOperations.strip_suffix_after_year(curr_name)
+                if not sugg or clean_curr.upper() != sugg.upper() or diag.get("needs_page_replacement"):
+                    return False
+            return True
+
+        # 2. Intentar obtener carpetas desde MySQL si está activo y tiene datos
+        correct_folders: List[Dict[str, Any]] = []
+        used_mysql = False
+
+        if self.mysql and getattr(self.mysql, "enabled", False):
+            try:
+                conn = self.mysql.get_connection(include_db=True)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT
+                                ci.id,
+                                ci.uuid,
+                                ci.nombre_original,
+                                ci.ruta_original,
+                                m.tipo_accion,
+                                m.nombre_nuevo,
+                                m.ruta_nueva
+                            FROM `carpetas_iniciales` ci
+                            LEFT JOIN (
+                                SELECT m1.*
+                                FROM `auditoria_movimientos_carpetas` m1
+                                JOIN (
+                                    SELECT mc.`carpeta_uuid`, MAX(mc.`id`) AS max_id
+                                    FROM `auditoria_movimientos_carpetas` mc
+                                    JOIN `ejecuciones_lotes` el_sub ON mc.`ejecucion_id` = el_sub.`id`
+                                    WHERE el_sub.`estado` != 'REVERTIDO'
+                                      AND mc.`tipo_accion` NOT LIKE 'DRY_RUN%%'
+                                    GROUP BY mc.`carpeta_uuid`
+                                ) m2 ON m1.`id` = m2.max_id
+                            ) m ON ci.`uuid` = m.`carpeta_uuid`
+                            ORDER BY ci.`id` ASC
+                        """)
+                        db_rows = cur.fetchall()
+                        if db_rows:
+                            used_mysql = True
+                            for r in db_rows:
+                                uuid_val = r.get("uuid")
+                                orig_n = r.get("nombre_original") or ""
+                                orig_r = r.get("ruta_original") or ""
+                                tipo_acc = r.get("tipo_accion") or ""
+                                curr_n = r.get("nombre_nuevo") or orig_n
+                                curr_r = r.get("ruta_nueva") or orig_r
+
+                                # Si en sesión en vivo tenemos una ruta más reciente para esta carpeta
+                                diag = (
+                                    diag_by_path.get(os.path.normcase(str(Path(curr_r))))
+                                    or diag_by_path.get(os.path.normcase(str(Path(orig_r))))
+                                    or diag_by_name.get(curr_n.upper())
+                                    or diag_by_name.get(orig_n.upper())
+                                )
+                                if diag and diag.get("folder_path"):
+                                    live_p = Path(diag["folder_path"])
+                                    if live_p.exists():
+                                        curr_r = str(live_p)
+                                        curr_n = live_p.name
+
+                                if _is_apartados_path_or_action(curr_r, tipo_acc):
+                                    continue
+                                if not _is_valid_structure_name(curr_n):
+                                    continue
+                                if not _is_diag_correct(diag, curr_n, orig_n, tipo_acc):
+                                    continue
+
+                                correct_folders.append({
+                                    "uuid": uuid_val,
+                                    "nombre_original": orig_n,
+                                    "nombre_actual": curr_n,
+                                    "ruta_actual": curr_r,
+                                })
+                finally:
+                    conn.close()
+            except Exception as db_exc:
+                logger.warning(f"No se pudo consultar MySQL para reporte de correctos, usando sesión en vivo: {db_exc}")
+
+        # 3. Fallback a Sesión en Vivo / Caché si MySQL no tenía registros
+        if not used_mysql:
+            source_items = live_items if live_items else list(diag_by_path.values())
+            seen_paths = set()
+            for item in source_items:
+                if not isinstance(item, dict):
+                    continue
+                curr_r = item.get("folder_path") or ""
+                if not curr_r:
+                    continue
+                norm_r = os.path.normcase(str(Path(curr_r)))
+                if norm_r in seen_paths:
+                    continue
+                seen_paths.add(norm_r)
+
+                curr_n = Path(curr_r).name
+                orig_n = item.get("initial_folder_name") or item.get("folder_data", {}).get("folder_name") or curr_n
+                if _is_apartados_path_or_action(curr_r, item.get("last_action", "")):
+                    continue
+                if not _is_valid_structure_name(curr_n):
+                    continue
+                if not _is_diag_correct(item, curr_n, orig_n):
+                    continue
+
+                correct_folders.append({
+                    "uuid": None,
+                    "nombre_original": orig_n,
+                    "nombre_actual": curr_n,
+                    "ruta_actual": curr_r,
+                })
+
+        # 4. Generador en streaming para los PDFs de las carpetas correctas
+        def _iter_correct_pdfs():
+            if used_mysql and correct_folders:
+                conn = self.mysql.get_connection(include_db=True)
+                try:
+                    batch_size = 200
+                    for i in range(0, len(correct_folders), batch_size):
+                        batch = correct_folders[i:i + batch_size]
+                        folder_map = {f["uuid"]: f for f in batch if f.get("uuid")}
+                        if not folder_map:
+                            continue
+                        uuids = list(folder_map.keys())
+                        placeholders = ",".join(["%s"] * len(uuids))
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                SELECT
+                                    ai.`carpeta_uuid`,
+                                    ai.`nombre_archivo_original`,
+                                    m.`nombre_nuevo`
+                                FROM `archivos_iniciales` ai
+                                LEFT JOIN (
+                                    SELECT m1.`carpeta_uuid`, m1.`nombre_anterior`, m1.`nombre_nuevo`
+                                    FROM `auditoria_movimientos_archivos` m1
+                                    JOIN (
+                                        SELECT ma.`carpeta_uuid`, ma.`nombre_anterior`, MAX(ma.`id`) AS max_id
+                                        FROM `auditoria_movimientos_archivos` ma
+                                        JOIN `ejecuciones_lotes` el_sub ON ma.`ejecucion_id` = el_sub.`id`
+                                        WHERE el_sub.`estado` != 'REVERTIDO'
+                                          AND ma.`tipo_accion` NOT LIKE 'DRY_RUN%%'
+                                          AND ma.`carpeta_uuid` IN ({placeholders})
+                                        GROUP BY ma.`carpeta_uuid`, ma.`nombre_anterior`
+                                    ) m2 ON m1.`id` = m2.max_id
+                                ) m ON ai.`carpeta_uuid` = m.`carpeta_uuid`
+                                   AND ai.`nombre_archivo_original` = m.`nombre_anterior`
+                                WHERE ai.`carpeta_uuid` IN ({placeholders})
+                                ORDER BY ai.`id` ASC
+                            """, tuple(uuids) + tuple(uuids))
+
+                            rows_by_uuid: Dict[str, List[Dict[str, Any]]] = {u: [] for u in uuids}
+                            for r in cur.fetchall():
+                                u = r.get("carpeta_uuid")
+                                if u in rows_by_uuid:
+                                    rows_by_uuid[u].append(r)
+
+                        for f_info in batch:
+                            u = f_info.get("uuid")
+                            f_orig = f_info["nombre_original"]
+                            f_curr = f_info["nombre_actual"]
+                            f_ruta = f_info["ruta_actual"]
+                            clean_base = FileOperations.strip_suffix_after_year(f_curr)
+                            db_pdf_rows = rows_by_uuid.get(u, []) if u else []
+
+                            if db_pdf_rows:
+                                for pr in db_pdf_rows:
+                                    pdf_orig = pr.get("nombre_archivo_original") or ""
+                                    pdf_new = pr.get("nombre_nuevo")
+                                    if not pdf_new:
+                                        if f_curr != f_orig and not CaratulaInspector.is_irregular_reg_pdf_name(pdf_orig):
+                                            cand_new = FileOperations.build_new_pdf_name(pdf_orig, clean_base, f_orig)
+                                            if Path(f_ruta).is_dir() and (Path(f_ruta) / cand_new).exists():
+                                                pdf_new = cand_new
+                                            elif Path(f_ruta).is_dir() and (Path(f_ruta) / pdf_orig).exists():
+                                                pdf_new = pdf_orig
+                                            else:
+                                                pdf_new = cand_new if (Path(f_ruta).is_dir() and not (Path(f_ruta) / pdf_orig).exists()) else pdf_orig
+                                        else:
+                                            pdf_new = pdf_orig
+                                    pdf_ruta = str(Path(f_ruta) / pdf_new)
+                                    yield (pdf_orig, pdf_new, pdf_ruta)
+                            else:
+                                # Fallback al disco si la carpeta no tenía filas en archivos_iniciales
+                                fp = Path(f_ruta)
+                                if fp.is_dir():
+                                    try:
+                                        pdfs = sorted(
+                                            [p for p in fp.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"],
+                                            key=lambda x: x.name,
+                                        )
+                                        for p in pdfs:
+                                            pdf_curr = p.name
+                                            if f_orig != f_curr and not CaratulaInspector.is_irregular_reg_pdf_name(pdf_curr):
+                                                orig_base = FileOperations.strip_suffix_after_year(f_orig)
+                                                pdf_orig = FileOperations.build_new_pdf_name(pdf_curr, orig_base, f_curr)
+                                            else:
+                                                pdf_orig = pdf_curr
+                                            yield (pdf_orig, pdf_curr, str(p))
+                                    except Exception:
+                                        pass
+                finally:
+                    conn.close()
+            else:
+                for f_info in correct_folders:
+                    f_orig = f_info["nombre_original"]
+                    f_curr = f_info["nombre_actual"]
+                    f_ruta = f_info["ruta_actual"]
+                    fp = Path(f_ruta)
+                    if not fp.is_dir():
+                        continue
+                    try:
+                        pdfs = sorted(
+                            [p for p in fp.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"],
+                            key=lambda x: x.name,
+                        )
+                        for p in pdfs:
+                            pdf_curr = p.name
+                            if f_orig != f_curr and not CaratulaInspector.is_irregular_reg_pdf_name(pdf_curr):
+                                orig_base = FileOperations.strip_suffix_after_year(f_orig)
+                                pdf_orig = FileOperations.build_new_pdf_name(pdf_curr, orig_base, f_curr)
+                            else:
+                                pdf_orig = pdf_curr
+                            yield (pdf_orig, pdf_curr, str(p))
+                    except Exception:
+                        pass
+
+        # 5. Escribir el archivo Excel (.xlsx) en modo streaming
+        with StreamingXlsxWriter(output_path) as writer:
+            folder_rows = (
+                (f["nombre_original"], f["nombre_actual"], f["ruta_actual"])
+                for f in correct_folders
+            )
+            total_folders_written = writer.add_sheet_from_iter(
+                title="Carpetas_Correctas",
+                headers=["Nombre_Original", "Nombre_Actual", "Ruta_Actual"],
+                rows_iter=folder_rows,
+            )
+            pdf_summary = writer.add_paginated_sheets_from_iter(
+                base_title="PDFs_Correctos",
+                headers=["Nombre_Original", "Nombre_Actual", "Ruta_Actual"],
+                rows_iter=_iter_correct_pdfs(),
+                max_rows_per_sheet=max_rows_per_pdf_sheet,
+            )
+
+        return {
+            "output_path": str(Path(output_path).resolve()),
+            "total_carpetas_correctas": total_folders_written,
+            "total_pdfs_correctos": pdf_summary["total_rows"],
+            "hojas_pdfs": pdf_summary["sheets_created"],
+            "fuente": "MYSQL" if used_mysql else "SESION_EN_VIVO",
         }
 
     @staticmethod

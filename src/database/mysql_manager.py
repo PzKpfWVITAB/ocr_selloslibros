@@ -951,9 +951,12 @@ class MySQLManager:
                             SELECT m1.*
                             FROM `auditoria_movimientos_carpetas` m1
                             JOIN (
-                                SELECT `carpeta_uuid`, MAX(`id`) AS max_id
-                                FROM `auditoria_movimientos_carpetas`
-                                GROUP BY `carpeta_uuid`
+                                SELECT mc.`carpeta_uuid`, MAX(mc.`id`) AS max_id
+                                FROM `auditoria_movimientos_carpetas` mc
+                                JOIN `ejecuciones_lotes` el_sub ON mc.`ejecucion_id` = el_sub.`id`
+                                WHERE el_sub.`estado` != 'REVERTIDO'
+                                  AND mc.`tipo_accion` NOT LIKE 'DRY_RUN%%'
+                                GROUP BY mc.`carpeta_uuid`
                             ) m2 ON m1.`id` = m2.max_id
                         ) m ON ci.`uuid` = m.`carpeta_uuid`
                         LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`
@@ -1012,9 +1015,12 @@ class MySQLManager:
                             SELECT m1.*
                             FROM `auditoria_movimientos_archivos` m1
                             JOIN (
-                                SELECT `carpeta_uuid`, `nombre_anterior`, MAX(`id`) AS max_id
-                                FROM `auditoria_movimientos_archivos`
-                                GROUP BY `carpeta_uuid`, `nombre_anterior`
+                                SELECT ma.`carpeta_uuid`, ma.`nombre_anterior`, MAX(ma.`id`) AS max_id
+                                FROM `auditoria_movimientos_archivos` ma
+                                JOIN `ejecuciones_lotes` el_sub ON ma.`ejecucion_id` = el_sub.`id`
+                                WHERE el_sub.`estado` != 'REVERTIDO'
+                                  AND ma.`tipo_accion` NOT LIKE 'DRY_RUN%%'
+                                GROUP BY ma.`carpeta_uuid`, ma.`nombre_anterior`
                             ) m2 ON m1.`id` = m2.max_id
                         ) m ON ai.`carpeta_uuid` = m.`carpeta_uuid` AND ai.`nombre_archivo_original` = m.`nombre_anterior`
                         LEFT JOIN `ejecuciones_lotes` el ON m.`ejecucion_id` = el.`id`

@@ -651,6 +651,13 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
             command=self.export_csv
         ).pack(side=tk.RIGHT)
 
+        ttk.Button(
+            top_bar,
+            text="📗 Exportar Correctos Antes/Ahora (.xlsx)",
+            style="Success.TButton",
+            command=self.export_correctos_xlsx
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
         # 2. Panel Superior de Tarjetas KPI / Dimensionamiento
         kpi_frame = ttk.Frame(container)
         kpi_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1339,6 +1346,10 @@ class ExecutiveTraceabilityDashboardDialog(tk.Toplevel):
             )
         except Exception as e:
             messagebox.showerror("Error al Exportar", f"Ocurrió un error al guardar el archivo CSV:\n{e}", parent=self)
+
+    def export_correctos_xlsx(self):
+        """Exporta el reporte limpio (.xlsx) en streaming solo con Carpetas y PDFs Correctos (Original, Actual, Ruta_Actual)."""
+        self.parent_app.export_correctos_xlsx_dialog(parent_win=self)
 
 
 class ManualEditDialog(tk.Toplevel):
@@ -2698,6 +2709,7 @@ class OCRLibrosApp(tk.Tk):
 
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label="📊 Dashboard Ejecutivo: Estadísticas MySQL (Original vs Final)...", command=self.open_statistics_dashboard)
+        tools_menu.add_command(label="📗 Exportar Reporte de Correctos Antes/Ahora (.xlsx)...", command=self.export_correctos_xlsx_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🧪 Simular Paso 1 (Dry-Run 0 Escrituras)...", command=self.open_step1_dry_run_dialog)
         tools_menu.add_command(label="📁 Paso 1: Indexar en MySQL y Renombrar por 1er PDF", command=self.run_step1_index_and_rename_async)
@@ -3160,6 +3172,12 @@ class OCRLibrosApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             row_a2,
+            text="📗 Exportar Correctos Antes/Ahora (.xlsx)",
+            style="Success.TButton",
+            command=self.export_correctos_xlsx_dialog
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            row_a2,
             text="⏪ Revertir Última Ejecución (Rollback Lote)",
             style="Action.TButton",
             command=self.trigger_rollback_last_batch
@@ -3374,6 +3392,56 @@ class OCRLibrosApp(tk.Tk):
 
     def open_statistics_dashboard(self):
         ExecutiveTraceabilityDashboardDialog(self)
+
+    def export_correctos_xlsx_dialog(self, parent_win=None):
+        """
+        Abre diálogo para guardar el reporte limpio (.xlsx) en streaming con solo
+        las Carpetas y PDFs Correctos (Nombre_Original | Nombre_Actual | Ruta_Actual),
+        paginando automáticamente los PDFs cada 900,000 filas.
+        """
+        target_parent = parent_win or self
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        def_name = f"Trazabilidad_Correctos_Antes_Ahora_{now_str}.xlsx"
+        file_path = filedialog.asksaveasfilename(
+            parent=target_parent,
+            title="Guardar Reporte de Trazabilidad de Correctos (Carpetas y PDFs)",
+            defaultextension=".xlsx",
+            initialfile=def_name,
+            filetypes=[("Libro de Excel (.xlsx)", "*.xlsx"), ("Todos los archivos", "*.*")]
+        )
+        if not file_path:
+            return
+
+        live_items = list(self.all_folder_items) if hasattr(self, "all_folder_items") else []
+
+        def _work():
+            return self.service.exportar_trazabilidad_correctos_xlsx(
+                output_path=file_path,
+                live_items=live_items,
+                max_rows_per_pdf_sheet=900_000,
+            )
+
+        def _done(res, err):
+            if err:
+                messagebox.showerror(
+                    "Error al Exportar",
+                    f"Ocurrió un error al generar el archivo Excel (.xlsx):\n{err}",
+                    parent=target_parent,
+                )
+                return
+            hojas_str = ", ".join(res.get("hojas_pdfs", [])) or "PDFs_Correctos_1"
+            messagebox.showinfo(
+                "✔ Reporte de Correctos Generado (.xlsx)",
+                f"El reporte de trazabilidad (solo Correctos) se generó en modo streaming:\n"
+                f"{res.get('output_path')}\n\n"
+                f"• Fuente de datos: {res.get('fuente')}\n"
+                f"• Hoja 'Carpetas_Correctas': {res.get('total_carpetas_correctas', 0):,} carpeta(s)\n"
+                f"• Hojas de PDFs ({hojas_str}): {res.get('total_pdfs_correctos', 0):,} PDF(s)\n"
+                f"• Columnas: Nombre_Original | Nombre_Actual | Ruta_Actual",
+                parent=target_parent,
+            )
+
+        self._run_exclusive_in_thread("Exportando Correctos a Excel (.xlsx)", _work, _done)
 
     def open_mysql_dialog(self):
         MySQLSettingsDialog(self)
